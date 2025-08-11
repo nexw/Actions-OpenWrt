@@ -30,6 +30,7 @@ env:
   TZ: Asia/Shanghai
   COMMIT_ID: 594da824a4f2f9582941e612f1a912773d43ff1d
   EMAIL: johnny@nexwy.me
+  PATCH: mt7981b-cudy-tr3000-v1.dtsi
 
 jobs:
   build:
@@ -68,6 +69,7 @@ jobs:
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        [ -e $PATCH ] && mv $PATCH openwrt/target/linux/mediatek/dts
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
