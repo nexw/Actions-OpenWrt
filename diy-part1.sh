@@ -18,4 +18,4 @@ echo 'src-git OpenClash https://github.com/vernesong/OpenClash' >>feeds.conf.def
 #echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >>feeds.conf.default
 cd #GITHUB_WORKSPACE/package
 git clone https://github.com/jerrykuku/luci-app-argon-config.git
-git clone https://github.com/jerrykuku/luci-theme-argon.git
+#git clone https://github.com/jerrykuku/luci-theme-argon.git
