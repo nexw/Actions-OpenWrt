@@ -26,3 +26,5 @@ echo "current directory : $(pwd) "
 ls -alh 
 [ -e "$PATCH" ] && tar zxvf $PATCH -C $GITHUB_WORKSPACE/openwrt/
 [ -e "$PATCH2" ] && tar zxvf $PATCH2 -C $GITHUB_WORKSPACE/openwrt/
+cd $GITHUB_WORKSPACE/openwrt/
+echo "$(pwd)"
