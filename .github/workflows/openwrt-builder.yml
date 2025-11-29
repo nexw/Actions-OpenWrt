@@ -19,7 +19,7 @@ on:
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
   REPO_BRANCH: main
-  BUILD_BRANCH: v24.10.2
+  BUILD_BRANCH: v24.10.4
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
@@ -64,7 +64,6 @@ jobs:
         git clone $REPO_URL openwrt
         cd openwrt
         git checkout $BUILD_BRANCH
-        git cherry-pick $COMMIT_ID
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Load custom feeds
