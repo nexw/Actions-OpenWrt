@@ -22,8 +22,6 @@ env:
   BUILD_BRANCH: v24.10.4
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -31,7 +29,6 @@ env:
   COMMIT_ID: 594da824a4f2f9582941e612f1a912773d43ff1d
   EMAIL: johnny@nexwy.me
   PATCH: patch.tar.gz
-  PATCH2: patch2.tar.gz
 
 jobs:
   build:
@@ -66,26 +63,17 @@ jobs:
         git checkout $BUILD_BRANCH
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Load custom feeds
+    - name: To apply a patch 
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        tar zxvf $GITHUB_WORKSPACE/$PATCH
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-
+    
     - name: Download package
       id: package
       run: |
