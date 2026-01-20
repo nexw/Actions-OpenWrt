@@ -1,0 +1,21 @@
+name: Debug with tmate
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v4
+        with:
+          # 可选: install tmate if not present; action 会处理
+          install: true
+
+      - name: Keep job alive for 1 hour
+        run: |
+          # job 运行期间 tmate session 会保持可用；根据需要修改等待时间
+          sleep 3600
