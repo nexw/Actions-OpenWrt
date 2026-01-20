@@ -10,7 +10,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Start tmate session
-        uses: mxschmitt/action-tmate@v4
+        uses: mxschmitt/action-tmate@v3
         with:
           # 可选: install tmate if not present; action 会处理
           install: true
