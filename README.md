@@ -33,7 +33,7 @@
 | 补丁 | 内容 |
 |---|---|
 | `0001-nradio-c8-688-wt9104-dts.patch` | 按实机（官方 1.9.4.n2.c3 DTB + 现网 GPIO 表）修正：WiFi LED pio13→**34**；`cpe-sel0` 30→**29**、新增 **cpe-sel1(30)**；新增 **fan-hw(27)/fan-fg(28)** 与 `pwm-fan`（25 kHz，首级 50% 保底）；保留 `reset`/`wps` 按键 |
-| `0002-nradio-c8-688-sysupgrade-and-mac.patch` | `platform.sh`：数据分区优先用原厂 `app_data`（老批次回退 `rootfs_data`）；`02_network`：`bdinfo` 的 `fac_mac` 键去掉多余空格（原样匹配，否则 MAC 读不到） |
+| `0002-nradio-c8-688-bdinfo-fac-mac.patch` | `02_network`：`bdinfo` 的 `fac_mac` 键去掉多余空格（否则 `get_mac_ascii` 匹配不到，MAC 读不出来）。**不改** `platform.sh` 的数据分区（上游 `rootfs_data` 找不到时会自动回退到 rootfs 分区内的 overlay 区，保持与上游一致） |
 
 `files/` 覆盖：
 - `etc/uci-defaults/99-nradio-c8-defaults`：LAN `192.168.66.1`、hostname `C8`、时区 CST-8
