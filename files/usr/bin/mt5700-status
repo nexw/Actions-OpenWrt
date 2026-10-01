@@ -1,0 +1,13 @@
+#!/bin/sh
+# 5G 模块（TD Tech MT5700M-CN）只读状态查询
+# 用法: mt5700-status [--signal|--temp|--sim]
+AT=/usr/bin/mt5700-at
+[ -x "$AT" ] || { echo "mt5700-at 不存在"; exit 1; }
+
+case "$1" in
+	--signal) $AT --cmds "AT^MONSC" "AT^HFREQINFO?" "AT^HCSQ?" ;;
+	--temp)   $AT --cmds "AT^CHIPTEMP?" "AT^DSFLOWQRY" ;;
+	--sim)    $AT --cmds "AT+CPIN?" "AT^SIMSQ?" "AT+CIMI" "AT^ICCID?" ;;
+	*)        $AT --cmds "AT+CPIN?" "AT^SIMSQ?" "AT+CEREG?" "AT+CGATT?" "AT+COPS?" \
+				"AT+CGPADDR" "AT^HCSQ?" "AT^MONSC" "AT^CHIPTEMP?" ;;
+esac

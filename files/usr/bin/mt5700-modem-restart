@@ -1,0 +1,11 @@
+#!/bin/sh
+# 让 MT5700M-CN 重新搜索/拨号（CFUN 循环）。会短暂断网约 10~20 秒。
+echo "-> AT+CFUN=0 (关闭射频)"
+/usr/bin/mt5700-at --raw "AT+CFUN=0"
+sleep 3
+echo "-> AT+CFUN=1 (重新开启)"
+/usr/bin/mt5700-at --raw "AT+CFUN=1"
+sleep 10
+echo
+echo "=== 当前状态 ==="
+/usr/bin/mt5700-status

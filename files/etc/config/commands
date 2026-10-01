@@ -1,0 +1,42 @@
+
+config command
+	option name '5G：模块状态（只读）'
+	option command '/usr/bin/mt5700-status'
+	option param '0'
+	option public '0'
+
+config command
+	option name '5G：信号 / 频段 / 小区'
+	option command '/usr/bin/mt5700-status --signal'
+	option param '0'
+	option public '0'
+
+config command
+	option name '5G：SIM 卡信息'
+	option command '/usr/bin/mt5700-status --sim'
+	option param '0'
+	option public '0'
+
+config command
+	option name '5G：模块温度 / 流量'
+	option command '/usr/bin/mt5700-status --temp'
+	option param '0'
+	option public '0'
+
+config command
+	option name '5G：重启模块射频（断网约 15 秒）'
+	option command '/usr/bin/mt5700-modem-restart'
+	option param '0'
+	option public '0'
+
+config command
+	option name '5G：SIM 槽位切换（参数填 0/1/2/6）'
+	option command '/usr/bin/mt5700-simsel'
+	option param '1'
+	option public '0'
+
+config command
+	option name '5G：SIM 槽位状态'
+	option command '/usr/bin/mt5700-simsel --status'
+	option param '0'
+	option public '0'
