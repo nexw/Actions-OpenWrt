@@ -22,11 +22,14 @@
 
 ## 构建基线
 
-- 源码：`immortalwrt/immortalwrt` master，**pin 到** `bf156b68e3c9829f3e494e458caf97a40413c34c`
+- 源码：`immortalwrt/immortalwrt` **发行版 tag `v25.12.2`**（openwrt-25.12 分支的发行点；feeds 按 commit 固定，可复现）
 - 机型：`CONFIG_TARGET_PROFILE="DEVICE_nradio_c8-668gl"`（上游已有该机型）
-- 包集：沿用旧 `Actions-OpenWrt` 的包选择（argon 主题、samba4、smartdns、ttyd、wol、upnp、ddns 等），
-  另加 MT5700 适配：`kmod-usb-serial(-option)`、`kmod-usb-net-cdc-ncm`、`usbutils`、`picocom`、
-  `python3-light` + `python3-pyserial`、`luci-app-commands`。不含任何 Mwrt/厂商私有包。
+- 默认 **中文界面**：`default-settings-chn` + `LUCI_LANG_zh_Hans` + `luci-i18n-base-zh-cn`，
+  并在 `files/` 里固定 `luci.main.lang=zh_cn`、时区 CST-8、国内 NTP、`filter_aaaa=1`（LAN 无 IPv6 上游）
+- 包集**只保留稳定组网所需**（275 包）：argon 主题、`luci-app-commands`/`ttyd`（维护用）、
+  MT5700 工具链（`kmod-usb-serial-option`、`kmod-usb-net-cdc-ncm`、`usbutils`、`picocom`、
+  `python3-light`+`python3-pyserial`）、风扇 `kmod-hwmon-pwmfan`、overlay `f2fs-tools`/`kmod-fs-f2fs`/`kmod-fs-ext4`
+- **明确不含**：Docker/容器、Samba4/KSMBD、USB 存储/automount、smartdns、ddns、upnp、wol、aria2、minidlna 等 NAS/娱乐组件
 
 ## 本仓库对上游的补丁（`patches/`）
 

@@ -1,6 +1,5 @@
 #!/bin/sh
 # NRadio C8 (WT9104 / C8-688) 首次启动默认值
-# 说明：与现网 Mwrt 固件保持同一网段，方便平滑替换（LAN 192.168.66.0/24）
 uci -q batch <<-EOF
 	set system.@system[0].hostname='C8'
 	set system.@system[0].timezone='CST-8'
@@ -9,12 +8,14 @@ uci -q batch <<-EOF
 	set network.lan.netmask='255.255.255.0'
 	set network.lan.delegate='1'
 	set dhcp.lan.leasetime='12h'
+	# LAN 侧没有可用的 IPv6 上游（模块不下发 PD），过滤 AAAA 避免客户端解析到不可达地址
+	set dhcp.@dnsmasq[0].filter_aaaa='1'
+	# 固定中文界面（default-settings 默认是 auto，跟随浏览器）
+	set luci.main.lang='zh_cn'
 	commit system
 	commit network
 	commit dhcp
+	commit luci
 EOF
-
-# 5G 模块的 SIM 槽位选择（cpe-sel0/cpe-sel1）在本机是 GPIO，由 gpio-export 拉起；
-# 出厂 bdinfo 的 fac_mac 会被 02_network 读取，无需在此设置。
 
 exit 0

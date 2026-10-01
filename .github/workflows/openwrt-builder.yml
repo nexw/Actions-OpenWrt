@@ -12,8 +12,8 @@ on:
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
   REPO_BRANCH: master
-  # 固定到本仓库验证过的 commit（可复现构建）
-  BUILD_BRANCH: bf156b68e3c9829f3e494e458caf97a40413c34c
+  # immutable 最新发行版 tag（可复现；openwrt-25.12 分支的发行点）
+  BUILD_BRANCH: v25.12.2
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
