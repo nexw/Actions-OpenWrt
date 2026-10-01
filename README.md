@@ -35,6 +35,17 @@
 | `0001-nradio-c8-688-wt9104-dts.patch` | 按实机（官方 1.9.4.n2.c3 DTB + 现网 GPIO 表）修正：WiFi LED pio13→**34**；`cpe-sel0` 30→**29**、新增 **cpe-sel1(30)**；新增 **fan-hw(27)/fan-fg(28)** 与 `pwm-fan`（25 kHz，首级 50% 保底）；保留 `reset`/`wps` 按键 |
 | `0002-nradio-c8-688-bdinfo-fac-mac.patch` | `02_network`：`bdinfo` 的 `fac_mac` 键去掉多余空格（否则 `get_mac_ascii` 匹配不到，MAC 读不出来）。**不改** `platform.sh` 的数据分区（上游 `rootfs_data` 找不到时会自动回退到 rootfs 分区内的 overlay 区，保持与上游一致） |
 
+### 已实机验证（2026-10-01 首刷）
+
+- 刷入后：`board_name=nradio,c8-668gl`、ImmortalWrt SNAPSHOT (kernel 6.18.52)、LAN `192.168.66.1`、WAN 从 5G 模块 DHCP 到 `192.168.8.134`
+- DTS 全部生效：按键 `gpio-1 reset` / `gpio-9 wps`（IRQ 输入）已注册；LED `blue:power/indicator-0/indicator-1/wlan`（**wlan=pio34** 修正生效）；`gpio-export` 5 路 `cpe-pwr/sel0/sel1/fan-hw/fan-fg` 全部导出
+- 5G 模块可控：`/dev/ttyUSB0..4` 自动就位，`mt5700-at` 正常应答（无 SIM 时 `AT+CPIN?` = `+CME ERROR: 10`，属预期）
+- **overlay 持久化坑（重要）**：若原厂 GPT 没有 `rootfs_data` 分区，fstools 会走"分区内 loop"路径并要求 `mkfs.f2fs`；旧镜像缺该工具 → 回退 tmpfs（**重启丢配置**）。本机处置：
+  1. 把原厂 `app_data`(p10) 改名为 `rootfs_data` 并缩到 96MB（`fstools` 对 ≤100MiB 的面积用 `mkfs.ext4`，镜像自带）；
+  2. U-Boot `bootargs` 追加 `fstools_partname_fallback_scan=1 fstools_overlay_fstype=ext4`
+     （`root=PARTLABEL=` 形式下，`partname.c` 默认跳过同名分区扫描，必须显式打开）
+  3. 新版镜像已带 `f2fs-tools`+`kmod-fs-f2fs`：**全新安装**时（无 rootfs_data 分区）会自动用 6.5GB 的分区内 f2fs overlay，无需手工干预；若想在本机切到 6.5GB，执行 `fw_setenv bootargs`（清空）后重启即可。
+
 `files/` 覆盖：
 - `etc/uci-defaults/99-nradio-c8-defaults`：LAN `192.168.66.1`、hostname `C8`、时区 CST-8
 - `etc/hotplug.d/usb/20-mt5700-serial`：把模块 5 个 `ff/06` 接口绑定到 usb-serial

@@ -23,6 +23,8 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   EMAIL: johnny@nexwy.me
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   build:
@@ -31,6 +33,14 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@main
+
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: /home/runner/.ccache
+        key: ccache-${{ env.BUILD_BRANCH }}-${{ hashFiles('.config') }}
+        restore-keys: |
+          ccache-${{ env.BUILD_BRANCH }}-
 
     - name: Initialization environment
       env:
@@ -93,6 +103,7 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
+        grep -q '^CONFIG_CCACHE=y' .config && echo "ccache enabled: $(ccache -s | head -3)"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
