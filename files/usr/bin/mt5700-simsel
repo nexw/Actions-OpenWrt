@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""mt5700-simsel — TD Tech MT5700M-CN 的 SIM 槽位选择（按厂商 mt5700m.sh 的 4 槽位表）
+
+槽位表（GPIO 经 gpio-export: cpe-sel0=pio29, cpe-sel1=pio30）:
+  6 = 外置反面   sel1=1 sel0=1  AT^SCICHG=0,1
+  0 = 外置正面   sel1=1 sel0=0  AT^SCICHG=0,1
+  1 = 内置 SIM1  sel1=1 sel0=1  AT^SCICHG=1,0
+  2 = 内置 SIM2  sel1=0 sel0=1  AT^SCICHG=1,0
+
+用法:
+  mt5700-simsel --list            列出槽位表
+  mt5700-simsel 6                 切到槽位 6 并等待 SIM 就绪
+  mt5700-simsel --scan            依次尝试 6/0/1/2，直到检测到 SIM（返回 0）
+  mt5700-simsel --status          只读当前 SIM/注册状态
+"""
+import argparse
+import glob
+import os
+import re
+import sys
+import time
+
+try:
+    import serial
+except ImportError:
+    serial = None
+
+SLOTS = {
+    6: {"name": "外置反面SIM卡", "sel1": 1, "sel0": 1, "scichg": "0,1"},
+    0: {"name": "外置正面SIM卡", "sel1": 1, "sel0": 0, "scichg": "0,1"},
+    1: {"name": "内置SIM卡1", "sel1": 1, "sel0": 1, "scichg": "1,0"},
+    2: {"name": "内置SIM卡2", "sel1": 0, "sel0": 1, "scichg": "1,0"},
+}
+SCAN_ORDER = [6, 0, 1, 2]
+URC_PREFIX = ("^RSSI", "^CERSSI", "^HCSQ", "^DSFLOWRPT", "+CMTI", "+CLIP", "+C5GREG")
+
+
+class Modem:
+    def __init__(self, port="/dev/ttyUSB1", baud=115200, timeout=4.0):
+        self.port, self.timeout = port, timeout
+        self.io = serial.Serial(port, baud, timeout=0.2)
+
+    def cmd(self, c, wait=None):
+        self.io.reset_input_buffer()
+        self.io.write((c + "\r").encode())
+        deadline = time.time() + (wait if wait is not None else self.timeout)
+        buf = ""
+        while time.time() < deadline:
+            chunk = self.io.read(4096)
+            if chunk:
+                buf += chunk.decode("utf-8", "replace")
+                if re.search(r"^\s*(OK|ERROR)\s*$", buf, re.M):
+                    break
+            else:
+                time.sleep(0.05)
+        lines = [l for l in buf.splitlines()
+                 if l.strip() and not l.strip().startswith("AT")
+                 and not any(l.strip().startswith(u) for u in URC_PREFIX)]
+        return "\n".join(lines)
+
+    def close(self):
+        try:
+            self.io.close()
+        except Exception:
+            pass
+
+
+def gpio_write(name, value):
+    p = f"/sys/class/gpio/{name}/value"
+    if not os.path.exists(p):
+        return False
+    with open(p, "w") as f:
+        f.write(str(value))
+    return True
+
+
+def read_gpios():
+    out = {}
+    for n in ("cpe-sel0", "cpe-sel1", "cpe-pwr"):
+        try:
+            out[n] = open(f"/sys/class/gpio/{n}/value").read().strip()
+        except Exception:
+            out[n] = "?"
+    return out
+
+
+def sim_state(m):
+    cpin = m.cmd("AT+CPIN?", wait=2.0)
+    simsq = m.cmd("AT^SIMSQ?", wait=2.0)
+    creg = m.cmd("AT+CEREG?", wait=2.0)
+    ready = bool("READY" in cpin or re.search(r"\^SIMSQ:\s*1,\s*[1-9]", simsq))
+    return ready, cpin.strip(), simsq.strip(), creg.strip()
+
+
+def switch_slot(m, slot, settle=18):
+    s = SLOTS[slot]
+    print(f"==> 切换到槽位 {slot}（{s['name']}）：cpe-sel1={s['sel1']} cpe-sel0={s['sel0']} SCICHG={s['scichg']}")
+    # 厂商流程：先都置 0，再设置目标值
+    gpio_write("cpe-sel1", 0)
+    gpio_write("cpe-sel0", 0)
+    time.sleep(2)
+    gpio_write("cpe-sel1", s["sel1"])
+    gpio_write("cpe-sel0", s["sel0"])
+    print("    GPIO:", read_gpios())
+    m.cmd(f"AT^SCICHG={s['scichg']}", wait=2.0)
+    m.cmd("AT^HVSST=1,0", wait=2.0)
+    time.sleep(3)
+    m.cmd("AT^HVSST=1,1", wait=2.0)
+    m.cmd("AT+CFUN=0", wait=6.0)
+    time.sleep(3)
+    m.cmd("AT+CFUN=1", wait=6.0)
+    deadline = time.time() + settle
+    while time.time() < deadline:
+        time.sleep(3)
+        ready, cpin, simsq, creg = sim_state(m)
+        if ready:
+            print(f"   ✅ SIM 就绪（{cpin.splitlines()[-1] if cpin else ''} / {simsq.splitlines()[-1] if simsq else ''}）")
+            return True
+    ready, cpin, simsq, creg = sim_state(m)
+    print(f"   ❌ 未检测到 SIM（{cpin.splitlines()[-1] if cpin else '无响应'} / {simsq.splitlines()[-1] if simsq else ''}）")
+    return False
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("slot", nargs="?", type=int)
+    ap.add_argument("--scan", action="store_true")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--port", default="/dev/ttyUSB1")
+    a = ap.parse_args()
+
+    if a.list:
+        for k in SCAN_ORDER:
+            s = SLOTS[k]
+            print(f"  {k}: {s['name']:12s} sel1={s['sel1']} sel0={s['sel0']} SCICHG={s['scichg']}")
+        return 0
+
+    if serial is None:
+        print("需要 python3-pyserial", file=sys.stderr)
+        return 1
+
+    m = Modem(a.port)
+    try:
+        print("GPIO:", read_gpios())
+        if a.status or (a.slot is None and not a.scan):
+            ready, cpin, simsq, creg = sim_state(m)
+            print("CPIN:", cpin)
+            print("SIMSQ:", simsq)
+            print("CEREG:", creg)
+            print("MONSC:", m.cmd("AT^MONSC"))
+            print("CGPADDR:", m.cmd("AT+CGPADDR"))
+            print("SIM 就绪:" , ready)
+            return 0 if ready else 2
+
+        if a.scan:
+            for slot in SCAN_ORDER:
+                if switch_slot(m, slot):
+                    print(f"\n✅ 可用槽位 = {slot}（{SLOTS[slot]['name']}）")
+                    return 0
+            print("\n❌ 四个槽位都没检测到 SIM")
+            return 2
+
+        return 0 if switch_slot(m, a.slot) else 2
+    finally:
+        m.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

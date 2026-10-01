@@ -1,0 +1,5 @@
+
+config sim 'sim'
+	option enabled '1'
+	# SIM 槽位: 6=外置反面 0=外置正面 1=内置SIM1 2=内置SIM2
+	option slot '0'

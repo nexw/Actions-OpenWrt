@@ -99,8 +99,7 @@ class Modem:
             pass
         return buf
 
-    URC = ("^RSSI", "^CERSSI", "^HCSQ", "^DSFLOWRPT", "+CREG", "+CGREG", "+CEREG",
-           "+CMTI", "+CLIP", "^SIMSQ", "^MODE")
+    URC = ("^RSSI", "^CERSSI", "^HCSQ", "^DSFLOWRPT", "+CMTI", "+CLIP", "+C5GREG")
 
     def cmd(self, c: str, wait=None) -> str:
         """发一条命令，读到 OK/ERROR 为止；主动上报(URC)行单独丢弃，避免污染解析。"""
