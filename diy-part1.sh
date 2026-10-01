@@ -1,21 +1,26 @@
 #!/bin/bash
 #
-# https://github.com/P3TERX/Actions-OpenWrt
-# File name: diy-part1.sh
-# Description: OpenWrt DIY script part 1 (Before Update feeds)
+# diy-part1.sh — 在 update feeds 之前执行（cwd = openwrt/）
+# 用途：补充 feed / 把单包仓库放进 package/
 #
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
+set -e
 
-# Uncomment a feed source
-#sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
+echo "current directory : $(pwd)"
 
-# Add a feed source
-echo 'src-git OpenClash https://github.com/vernesong/OpenClash' >>feeds.conf.default
-#echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >>feeds.conf.default
-cd #GITHUB_WORKSPACE/package
-git clone https://github.com/jerrykuku/luci-app-argon-config.git
-git clone https://github.com/jerrykuku/luci-theme-argon.git
+# ---- 额外 feed（按需启用）----
+# src-git OpenClash https://github.com/vernesong/OpenClash   # 旧配置未选用，暂不引入以缩短构建时间
+
+# ---- 单包仓库（不是 feed，必须直接放进 package/）----
+# 注意：上游旧脚本写的是 `cd #GITHUB_WORKSPACE/package`（注释掉了路径），
+#       实际 cd 到 $HOME，导致 argon 主题从未被真正编进固件。这里修正。
+for repo in \
+    "https://github.com/jerrykuku/luci-theme-argon.git luci-theme-argon" \
+    "https://github.com/jerrykuku/luci-app-argon-config.git luci-app-argon-config" ; do
+    set -- $repo
+    url="$1"; dir="$2"
+    if [ ! -d "package/$dir" ]; then
+        git clone --depth 1 "$url" "package/$dir"
+    fi
+done
+
+echo "diy-part1 done"

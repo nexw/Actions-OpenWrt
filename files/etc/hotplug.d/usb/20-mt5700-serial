@@ -1,0 +1,17 @@
+#!/bin/sh
+# MT5700M-CN (TD Tech, 3466:3301) 有 5 个 ff/06 接口。
+# 部分内核不会自动把它们绑定到 usb-serial，这里显式交给 option/generic 驱动，
+# 以得到 /dev/ttyUSB0..4（AT 口为 ttyUSB1，115200）。
+[ "$ACTION" = "add" ] || exit 0
+[ "$SUBSYSTEM" = "usb" ] || exit 0
+
+case "$PRODUCT" in
+3466/3301*)
+	for d in /sys/bus/usb-serial/drivers/option /sys/bus/usb-serial/drivers/generic; do
+		[ -e "$d/new_id" ] && echo "3466 3301" > "$d/new_id" 2>/dev/null
+	done
+	logger -t mt5700 "MT5700M usb-serial 已注册（3466:3301）"
+	;;
+esac
+
+exit 0

@@ -1,0 +1,89 @@
+diff --git a/target/linux/mediatek/dts/mt7981b-nradio-c8-668gl.dts b/target/linux/mediatek/dts/mt7981b-nradio-c8-668gl.dts
+index 5361809d16..15ab764d0c 100644
+--- a/target/linux/mediatek/dts/mt7981b-nradio-c8-668gl.dts
++++ b/target/linux/mediatek/dts/mt7981b-nradio-c8-668gl.dts
+@@ -39,6 +39,12 @@
+ 		};
+ 	};
+ 
++	/*
++	 * WT9104 / C8-688 (@Manper 实机核对，官方 1.9.4.n2.c3 DTB 一致):
++	 *   cpe-pwr  = pio31 (ACTIVE_LOW, 初始 0 = 模块上电)
++	 *   cpe-sel0 = pio29, cpe-sel1 = pio30 (SIM/模块选择, 见厂商 4 槽位方案)
++	 *   fan-hw   = pio27 (风扇电源, 实机运行值为 1), fan-fg = pio28 (转速反馈)
++	 */
+ 	gpio-export {
+ 		compatible = "gpio-export";
+ 
+@@ -51,8 +57,37 @@
+ 		cpesel0 {
+ 			gpio-export,name = "cpe-sel0";
+ 			gpio-export,output = <1>;
++			gpios = <&pio 29 GPIO_ACTIVE_HIGH>;
++		};
++
++		cpesel1 {
++			gpio-export,name = "cpe-sel1";
++			gpio-export,output = <1>;
+ 			gpios = <&pio 30 GPIO_ACTIVE_HIGH>;
+ 		};
++
++		fanpower {
++			gpio-export,name = "fan-hw";
++			gpio-export,output = <1>;
++			gpios = <&pio 27 GPIO_ACTIVE_HIGH>;
++		};
++
++		fanfg {
++			gpio-export,name = "fan-fg";
++			gpio-export,output = <1>;
++			gpios = <&pio 28 GPIO_ACTIVE_HIGH>;
++		};
++	};
++
++	/* 风扇: PWMA0 (pio... pwm0_0) -> fan-hw 供电, cooling-levels 首级 50% 保底 */
++	fan: pwm-fan {
++		compatible = "pwm-fan";
++		#cooling-cells = <2>;
++		cooling-min-state = <0>;
++		cooling-max-state = <3>;
++		cooling-levels = <128 192 230 255>;
++		pwms = <&pwm 0 40000 0>;
++		status = "okay";
+ 	};
+ 
+ 	leds {
+@@ -81,11 +116,18 @@
+ 		led-wifi {
+ 			color = <LED_COLOR_ID_BLUE>;
+ 			function = LED_FUNCTION_WLAN;
+-			gpios = <&pio 13 GPIO_ACTIVE_LOW>;
++			/* 本机实测为 pio34（上游原写 pio13，实机不亮） */
++			gpios = <&pio 34 GPIO_ACTIVE_LOW>;
+ 		};
+ 	};
+ };
+ 
++&pwm {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&pwm0_pins>;
++};
++
+ &uart0 {
+ 	status = "okay";
+ };
+@@ -154,6 +196,13 @@
+ 			groups = "emmc_45";
+ 		};
+ 	};
++
++	pwm0_pins: pwm0-pins {
++		mux {
++			function = "pwm";
++			groups = "pwm0_0";
++		};
++	};
+ };
+ 
+ &eth {

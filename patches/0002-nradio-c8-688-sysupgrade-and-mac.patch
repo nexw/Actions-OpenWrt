@@ -1,0 +1,27 @@
+diff --git a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+index d8ad6f53ac..1c5657c367 100644
+--- a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
++++ b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+@@ -378,7 +378,8 @@ mediatek_setup_macs()
+ 		label_mac=$lan_mac
+ 		;;
+ 	nradio,c8-668gl)
+-		lan_mac=$(mmc_get_mac_ascii bdinfo "fac_mac ")
++		# 原厂 bdinfo 为 "fac_mac = XX:XX:..."（get_mac_ascii 会先去掉空白，故 key 不带空格）
++		lan_mac=$(mmc_get_mac_ascii bdinfo "fac_mac")
+ 		wan_mac=$(macaddr_add "$lan_mac" 2)
+ 		label_mac=$lan_mac
+ 		;;
+diff --git a/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh b/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+index c37290adeb..7cfaf45ebb 100644
+--- a/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
++++ b/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+@@ -380,6 +380,8 @@ platform_do_upgrade() {
+ 		;;
+ 	nradio,c8-668gl)
+ 		CI_DATAPART="rootfs_data"
++		# WT9104 / C8-688 批次的原厂 GPT 数据分区名为 app_data（老批次为 rootfs_data）
++		[ -n "$(find_mmc_part app_data)" ] && CI_DATAPART="app_data"
+ 		CI_KERNPART="kernel_2nd"
+ 		CI_ROOTPART="rootfs_2nd"
+ 		emmc_do_upgrade "$1"

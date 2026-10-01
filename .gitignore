@@ -1,0 +1,35 @@
+# ==== 本地/敏感内容：禁止入库 ====
+local/
+notes/
+backup/
+backups/
+
+# 设备原始转储 / 镜像（含 MAC、IMEI、密钥等隐私）
+*.bin
+*.img
+*.squashfs
+*.dtb
+*.ubi
+*.pcap
+deep-c8/
+vendor-fdt.dts
+
+# 密钥与凭据
+*.pem
+*.key
+*.crt
+id_rsa*
+id_ed25519*
+.env
+.env.*
+*.kdbx
+
+# 编辑器/系统
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Python 缓存
+__pycache__/
+*.pyc

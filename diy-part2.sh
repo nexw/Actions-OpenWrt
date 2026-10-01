@@ -1,28 +1,26 @@
 #!/bin/bash
 #
-# https://github.com/P3TERX/Actions-OpenWrt
-# File name: diy-part2.sh
-# Description: OpenWrt DIY script part 2 (After Update feeds)
+# diy-part2.sh — 在 update/install feeds 之后、make defconfig 之前执行
+#                （cwd = $GITHUB_WORKSPACE，openwrt 树在 ./openwrt）
+# 用途：应用本仓库 patches/ 下的机型补丁 + 少量默认值调整
 #
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
+set -e
 
-# Modify default IP
-#sed -i 's/192.168.1.1/192.168.50.5/g' package/base-files/files/bin/config_generate
+OPENWRT="$GITHUB_WORKSPACE/openwrt"
+echo "current directory : $(pwd)"
+echo "openwrt tree      : $OPENWRT"
 
-# Modify default theme
-#sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
+# ---- 1. 应用机型补丁（NRadio C8 / WT9104）----
+for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+    [ -e "$p" ] || continue
+    echo "applying $(basename "$p")"
+    git -C "$OPENWRT" apply --verbose "$p"
+done
 
-# Modify hostname
-#sed -i 's/OpenWrt/P3TERX-Router/g' package/base-files/files/bin/config_generate
+# ---- 2. 默认值调整（可选）----
+# 默认 LAN IP / 主机名 / 时区统一交给 files/etc/uci-defaults/99-nradio-c8-defaults
+# 如需在 config_generate 里改，可在此 sed：
+# sed -i 's/192.168.1.1/192.168.66.1/g' "$OPENWRT/package/base-files/files/bin/config_generate"
+# sed -i 's/OpenWrt/C8/g' "$OPENWRT/package/base-files/files/bin/config_generate"
 
-
-
-
-echo "current directory : $(pwd) "
-ls -alh 
-[ -e "$PATCH" ] && tar zxvf $PATCH -C $GITHUB_WORKSPACE/openwrt/
-[ -e "$PATCH2" ] && tar zxvf $PATCH2 -C $GITHUB_WORKSPACE/openwrt/
+echo "diy-part2 done"
