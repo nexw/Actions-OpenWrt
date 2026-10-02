@@ -38,6 +38,9 @@ parse_cfg() {
     ' "$1"
 }
 
+# 注意：镜像里这些文件在 git 里曾是 644（缺可执行位），刷机后 /usr/bin/ledctl
+# 之类会 "Permission denied"。这里统一按仓库内容重放，顺带把 mt5700-* 的工具
+# 与 init.d 的可执行位补齐（chmod 755）。
 # ---- 1. 代码文件 ----
 echo "==> 部署代码到 $R"
 for f in usr/bin/fanctl usr/bin/ledctl etc/init.d/fancontrol etc/init.d/ledschedule; do
@@ -81,12 +84,37 @@ echo "==> 同步 UCI 配置（不覆盖已有值）"
 deploy_config fancontrol
 deploy_config ledschedule
 
+# ---- 2.5 修补可执行位（历史镜像里 files/ 有 644 的文件）----
+echo "==> 修补可执行位"
+FIX=""
+for f in etc/init.d/fancontrol etc/init.d/ledschedule etc/init.d/mt5700-mode \
+         etc/init.d/mt5700-usbserial etc/init.d/mt5700-wan \
+         usr/bin/fanctl usr/bin/ledctl usr/bin/mt5700-passthrough \
+         usr/bin/mt5700-wan-check usr/bin/mt5700-at usr/bin/mt5700-status \
+         usr/bin/mt5700-sms usr/bin/mt5700-simsel usr/bin/mt5700-sim-check \
+         usr/bin/mt5700-modem-restart; do
+    FIX="$FIX /$f"
+done
+"${SSH[@]}" "chmod 755 $FIX" && echo "    ok"
+
 # ---- 3. 启用并启动 ----
 echo "==> 启用服务"
 "${SSH[@]}" '
 	sh -n /usr/bin/fanctl && sh -n /usr/bin/ledctl
-	/etc/init.d/fancontrol  enable >/dev/null 2>&1 || true
-	/etc/init.d/ledschedule enable >/dev/null 2>&1 || true
+	for s in mt5700-usbserial mt5700-mode mt5700-sim mt5700-wan \
+	         fancontrol ledschedule mt5700sms; do
+		/etc/init.d/$s enable >/dev/null 2>&1 || true
+	done
+	/etc/init.d/modeminfo enable >/dev/null 2>&1 || true
+	# 若模块在但 WAN 没拿到地址（多见于刷机后 boot 脚本没跑起来），补跑一次
+	if [ -e /dev/ttyUSB1 ] && ! ip -4 addr show eth1 2>/dev/null | grep -q "inet "; then
+		echo "    WAN 无地址，补跑模块启动脚本…"
+		for s in mt5700-usbserial mt5700-mode mt5700-sim mt5700-wan; do
+			/etc/init.d/$s start >/dev/null 2>&1 || true
+		done
+		sleep 8
+	fi
+	/etc/init.d/modeminfo restart >/dev/null 2>&1 || /etc/init.d/modeminfo start >/dev/null 2>&1 || true
 	/etc/init.d/fancontrol  restart >/dev/null 2>&1 || true
 	/etc/init.d/ledschedule restart >/dev/null 2>&1 || true
 	sleep 3
@@ -99,3 +127,9 @@ echo "==> 启用服务"
 	echo "----- ledctl status -----"
 	ledctl status
 '
+# 这几条单独取，避免在远程单引号块里再嵌引号
+echo
+echo "----- 模块 / 短信 -----"
+printf '  modconf  : %s\n' "$("${SSH[@]}" 'cat /tmp/modconf.conf 2>/dev/null' || true)"
+printf '  WAN      : %s\n' "$("${SSH[@]}" "ip -4 addr show eth1 2>/dev/null | sed -n 's/.*inet \\([0-9.]*\\).*/\\1/p'" || true)"
+printf '  未读短信 : %s\n' "$("${SSH[@]}" '/usr/bin/mt5700-sms count 2>/dev/null' || true)"

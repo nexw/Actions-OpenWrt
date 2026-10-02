@@ -52,4 +52,14 @@ start() {
 	return 0
 }
 
+status() {
+	# 这是一次性脚本（没有 procd 实例），自己报告一下已发布的信息
+	if [ -s "$CONF" ]; then
+		echo "modeminfo: 已发布 $(cat "$CONF") / sim_sel=$(cat "$SIMSEL" 2>/dev/null)"
+		return 0
+	fi
+	echo "modeminfo: 尚未发布模块信息（$CONF 为空）"
+	return 1
+}
+
 boot() { start; }
