@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+# 直通模式（mode 3）下，开机等模块拨号完成后确保 WAN 拿到运营商 IP。
+# 开机时 mt5700-sim 可能会切 SIM 槽位（AT+CFUN 循环），DHCP 抢跑会失败且不自动重试，
+# 因此这里做一段有限次重试；之后由 cron 里的 mt5700-wan-check 周期兜底。
+
+START=99
+STOP=10
+
+start() {
+	[ -x /usr/bin/mt5700-wan-check ] || return 0
+	(
+		sleep 45
+		for i in 1 2 3 4 5 6; do
+			/usr/bin/mt5700-wan-check && exit 0
+			sleep 20
+		done
+		logger -t mt5700-wan "多次重试仍未获得 WAN 地址，交给 cron 兜底"
+	) &
+}
+
+boot() { start; }
+stop() { :; }

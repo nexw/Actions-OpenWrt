@@ -1,0 +1,19 @@
+#!/bin/sh
+# 让 MT5700M-CN 进入下载模式(3466:3302)时被 option 驱动接管其接口，
+# 以便厂家 UpdateWizard_MT5700 能找到下载口（正常模式 3466:3301 由
+# /etc/init.d/mt5700-usbserial 在启动时注册）。
+# 注册 new_id 会立即触发对已存在接口的探测，无需重插拔。
+
+[ "$ACTION" = "add" ] || exit 0
+case "$PRODUCT" in
+3466/3302/*)
+	logger -t mt5700-dl "download mode detected, binding option driver"
+	(
+		echo "3466 3302" > /sys/bus/usb-serial/drivers/option1/new_id 2>/dev/null
+		sleep 1
+		for d in /sys/bus/usb/devices/*:1.*/; do
+			echo "$(basename "$d")" > /sys/bus/usb/drivers/option/bind 2>/dev/null
+		done
+	) &
+	;;
+esac

@@ -1,2 +1,4 @@
 # 每 5 分钟检查一次 5G 模块 SIM 是否就绪，掉卡/松卡恢复后自动重切槽位
 */5 * * * * /usr/bin/mt5700-sim-check >/dev/null 2>&1
+# 直通模式下兜底：模块断链/重拨后若 WAN 没拿到地址，重新触发 DHCP
+*/3 * * * * /usr/bin/mt5700-wan-check >/dev/null 2>&1

@@ -1,0 +1,39 @@
+#!/bin/sh /etc/rc.common
+# 按 UCI 配置（/etc/config/mt5700 的 eth.mode）应用模组网口工作模式。
+# 只在当前值与目标值不同时才下发并重启模组，避免每次开机都打断网络。
+# 应用顺序：mt5700-mode(97) → 串口/SIM → mt5700-wan(99) 负责拿到 WAN 地址。
+
+START=97
+STOP=10
+
+start() {
+	config_load mt5700
+	config_get want eth mode 3
+	config_get_bool enabled eth enabled 1
+	[ "$enabled" = "1" ] || return 0
+	[ -x /usr/bin/mt5700-at ] || return 0
+
+	(
+		sleep 20
+		cur=$(/usr/bin/mt5700-at --raw 'AT^TDCFG?' 2>/dev/null | tr -d '\r' \
+			| sed -n 's/.*Mode: *\([0-9]*\).*/\1/p' | head -1)
+		[ -z "$cur" ] && exit 0
+		if [ "$cur" != "$want" ]; then
+			logger -t mt5700-mode "网口模式 $cur -> $want，下发配置并重启模组"
+			/usr/bin/mt5700-at --raw "AT^TDCFG=\"infcfg\",\"mode\",$want" >/dev/null 2>&1
+			/usr/bin/mt5700-at --raw 'AT^RESET' >/dev/null 2>&1
+			# 等模块重新拨号
+			i=0
+			while [ "$i" -lt 18 ]; do
+				sleep 5
+				i=$((i + 5))
+				c2=$(/usr/bin/mt5700-at --raw 'AT^TDCFG?' 2>/dev/null | tr -d '\r' \
+					| sed -n 's/.*Mode: *\([0-9]*\).*/\1/p' | head -1)
+				[ "$c2" = "$want" ] && break
+			done
+		fi
+	) &
+}
+
+boot() { start; }
+stop() { :; }

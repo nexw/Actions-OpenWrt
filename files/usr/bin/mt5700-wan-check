@@ -1,0 +1,45 @@
+#!/bin/sh
+# 确保 5G 模块（IP 直通 / mode 3）下挂时，WAN(eth1) 能拿到运营商下发的 IP。
+#
+# 背景：直通模式下模块会把运营商分配的 IP 通过 DHCP 代理直接发给下挂设备（本路由器），
+# 此时路由器 WAN 的地址 = 模块 AT+CGPADDR 里的地址，全网只有 C8 这一层 NAT。
+# 但模块上电、重新拨号、切换 SIM 槽位（AT+CFUN 循环）期间链路会短暂不可用，
+# 开机时若 DHCP 抢在拨号完成之前发出，就会失败且不会自动重试（netifd 停在 pending）。
+# 本脚本检测到 eth1 没有 IPv4 时重新触发 DHCP，可被 init 脚本和 cron 调用。
+#
+# 退出码：0 = 已有地址或已成功获取；1 = 仍未获取到
+
+TAG="mt5700-wan-check"
+DEV="eth1"
+IFACE="wan"
+WAIT_MAX=25
+
+log() { logger -t "$TAG" "$*"; }
+
+wan_ip() {
+	ip -4 addr show "$DEV" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -1
+}
+
+ip_now="$(wan_ip)"
+if [ -n "$ip_now" ]; then
+	exit 0
+fi
+
+log "WAN($DEV) 无 IPv4，重新触发 DHCP"
+ifdown "$IFACE" 2>/dev/null
+sleep 2
+ifup "$IFACE" 2>/dev/null
+
+i=0
+while [ "$i" -lt "$WAIT_MAX" ]; do
+	ip_now="$(wan_ip)"
+	if [ -n "$ip_now" ]; then
+		log "已获取 WAN 地址 $ip_now"
+		exit 0
+	fi
+	sleep 1
+	i=$((i + 1))
+done
+
+log "仍未获取到 WAN 地址（模块可能还在拨号/注网）"
+exit 1

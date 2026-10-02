@@ -1,0 +1,60 @@
+#!/bin/sh
+# 切换 MT5700M-CN 网口工作模式（AT^TDCFG="infcfg","mode",<n>），改完需重启模块生效。
+#
+#   on  / 3 : IP 直通。模块把运营商分配的 IP 通过 DHCP 代理直接发给下挂设备，
+#             路由器 WAN 直接持有运营商 IP（如 10.x），全网只有 C8 一层 NAT。
+#             模块自身地址与下挂设备相同（AT+CGPADDR 与 WAN 地址一致）。
+#   off / 1 : 传统路由。模块自己拨号并做 NAT，下挂设备拿 192.168.8.x，形成两层 NAT。
+#
+# 注意：该设置保存在模块 NVM（掉电保存），重启模块/整机都有效。
+# 切换后模块要重新拨号，约 60~90 秒后才恢复链路。
+
+AT=/usr/bin/mt5700-at
+
+case "$1" in
+	on|3) MODE=3; NAME="IP 直通（单层 NAT）" ;;
+	off|1) MODE=1; NAME="传统路由（模块内 NAT）" ;;
+	--status|status)
+		m=$(/usr/bin/mt5700-at --raw 'AT^TDCFG?' 2>/dev/null | tr -d '\r' | sed -n 's/.*Mode: *\([0-9]*\).*/\1/p' | head -1)
+		case "$m" in
+			3) echo "mode 3（IP 直通，单层 NAT）";;
+			1) echo "mode 1（传统路由，双层 NAT）";;
+			"") echo "未知（模块未响应）"; exit 1;;
+			*) echo "mode $m";;
+		esac
+		exit 0
+		;;
+	*)
+		echo "用法: $0 on|off|--status"
+		echo "  on  = 切换为 IP 直通（mode 3）"
+		echo "  off = 切回传统路由（mode 1）"
+		exit 1
+		;;
+esac
+
+echo "-> 设置网口模式为 mode $MODE（$NAME）"
+"$AT" --raw "AT^TDCFG=\"infcfg\",\"mode\",$MODE" >/dev/null 2>&1 || {
+	echo "设置失败（模块无响应？）"
+	exit 1
+}
+
+echo "-> 重启模块使配置生效"
+"$AT" --raw "AT^RESET" >/dev/null 2>&1
+
+echo "-> 等待模块重新拨号（约 60~90 秒）"
+i=0
+while [ "$i" -lt 90 ]; do
+	sleep 5
+	i=$((i + 5))
+	cur=$(/usr/bin/mt5700-at --raw 'AT^TDCFG?' 2>/dev/null | tr -d '\r' | sed -n 's/.*Mode: *\([0-9]*\).*/\1/p' | head -1)
+	[ "$cur" = "$MODE" ] && break
+done
+
+if [ "$MODE" = "3" ]; then
+	echo "-> 重新获取 WAN 地址"
+	/usr/bin/mt5700-wan-check
+else
+	/usr/bin/mt5700-wan-check || true
+fi
+
+echo "完成。当前模式: $(/usr/bin/mt5700-passthrough --status)"

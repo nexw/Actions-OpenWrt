@@ -3,3 +3,12 @@ config sim 'sim'
 	option enabled '1'
 	# SIM 槽位: 6=外置反面 0=外置正面 1=内置SIM1 2=内置SIM2
 	option slot '0'
+
+config eth 'eth'
+	# 模组网口工作模式（AT^TDCFG="infcfg","mode",N），开机由 /etc/init.d/mt5700-mode 应用
+	#   3 = IP 直通：模块把运营商 IP 直接交给下挂设备，路由器 WAN 直接持有运营商 IP，
+	#       全网只有 C8 一层 NAT（推荐；模块设置存于模组 NVM，掉电保存）
+	#   1 = 传统路由：模块自己拨号并 NAT，下挂设备拿 192.168.8.x，两层 NAT
+	option mode '3'
+	# 是否开启模组自动拨号（AT^SETAUTODIAL），一般保持开启
+	option enabled '1'

@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# 让 MT5700M-CN（含其固件下载模式）的 USB 串口在本内核下自动绑定。
+#
+# 该模组的串口接口是 class ff / subclass 06，上游 usb-serial 的通用匹配规则
+# 不会认领（那是给 subclass 00 用的）；厂家固件是在自己的 option 驱动 id 表里
+# 内置了这个 PID。这里在启动时把 VID/PID 显式注册进 option 驱动，
+# 之后无论是正常模式还是下载模式枚举出来都能自动绑定：
+#   3466:3301 = 正常工作模式（ttyUSB0=diag, ttyUSB1=AT, ...）
+#   3466:3302 = 固件下载模式（厂家 UpdateWizard 升级模组固件时使用）
+# 注册 new_id 会立即触发对已存在接口的探测，所以不需要重插拔/重启。
+
+START=39
+STOP=10
+
+bind_ports() {
+	[ -w /sys/bus/usb-serial/drivers/option1/new_id ] || return 0
+	for _pid in 3301 3302; do
+		echo "3466 $_pid" > /sys/bus/usb-serial/drivers/option1/new_id 2>/dev/null
+	done
+}
+
+start() {
+	bind_ports
+	sleep 2
+	logger -t mt5700-usbserial "serial ports: $(ls /dev/ttyUSB* 2>/dev/null | tr '\n' ' ')"
+}
+
+boot() { start; }
