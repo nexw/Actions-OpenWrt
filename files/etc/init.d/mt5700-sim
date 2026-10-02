@@ -1,10 +1,12 @@
 #!/bin/sh /etc/rc.common
 # 开机确保 5G 模块使用正确的 SIM 槽位。
-# 判定：GPIO 与配置槽位不符 -> 直接切换；一致 -> 等就绪（两轮），仍不 READY 再切换。
+# - 开机后等 25s（模块上电/枚举完成）再检查
+# - 最多尝试 3 次切换；仍失败则交给 cron 里的 mt5700-sim-check 周期恢复
+# - 若已就绪则直接跳过，避免不必要的 RF 中断
 START=99
 STOP=10
 
-# slot -> "sel0 sel1"（按厂商 4 槽位表；slot1 与 slot6 GPIO 相同，靠 AT^SCICHG 区分）
+# slot -> "sel0 sel1"（slot1 与 slot6 GPIO 相同，靠 AT^SCICHG 区分）
 slot_gpios() {
 	case "$1" in
 		0) echo "0 1";;
@@ -16,35 +18,25 @@ slot_gpios() {
 }
 
 start() {
-	local enabled slot g want0 want1 cur0 cur1 round
+	local enabled slot attempt
 	config_load mt5700
 	config_get_bool enabled sim enabled 1
 	config_get slot sim slot 0
 	[ "$enabled" = "1" ] || return 0
 	[ -x /usr/bin/mt5700-simsel ] || return 0
 
-	g=$(slot_gpios "$slot") || return 0
-	want0=${g% *}; want1=${g#* }
-
 	(
-		sleep 10
-		cur0=$(cat /sys/class/gpio/cpe-sel0/value 2>/dev/null)
-		cur1=$(cat /sys/class/gpio/cpe-sel1/value 2>/dev/null)
-		if [ "$cur0" != "$want0" ] || [ "$cur1" != "$want1" ]; then
-			logger -t mt5700-sim "GPIO($cur0/$cur1) != 槽位$slot($want0/$want1)，执行切换"
+		sleep 25
+		for attempt in 1 2 3; do
+			if /usr/bin/mt5700-simsel --status >/dev/null 2>&1; then
+				logger -t mt5700-sim "SIM 已就绪（槽位 $slot，第 ${attempt} 次检查）"
+				exit 0
+			fi
+			logger -t mt5700-sim "SIM 未就绪，第 ${attempt} 次尝试切换到槽位 $slot"
 			/usr/bin/mt5700-simsel "$slot" >/tmp/mt5700-sim.log 2>&1
-		else
-			for round in 1 2; do
-				if /usr/bin/mt5700-simsel --status >/dev/null 2>&1; then
-					logger -t mt5700-sim "SIM 就绪（槽位$slot）"
-					exit 0
-				fi
-				sleep 15
-			done
-			logger -t mt5700-sim "槽位$slot 未读到 SIM，重试切换"
-			/usr/bin/mt5700-simsel "$slot" >/tmp/mt5700-sim.log 2>&1
-		fi
-		logger -t mt5700-sim "结果: $(tail -1 /tmp/mt5700-sim.log 2>/dev/null)"
+			sleep 15
+		done
+		logger -t mt5700-sim "3 次尝试后仍未检测到 SIM（请检查卡座）；后续由 mt5700-sim-check 周期重试"
 	) &
 }
 

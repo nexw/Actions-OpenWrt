@@ -1,0 +1,22 @@
+#!/bin/sh
+# 周期性检查 5G 模块 SIM 是否就绪（由 cron 每 5 分钟调用）。
+# 场景：SIM 松动/接触不良恢复后，或开机时模块未就绪导致切换失败 —— 自动重切槽位。
+[ -x /usr/bin/mt5700-simsel ] || exit 0
+
+LOCK=/var/lock/mt5700-sim.lock
+[ -f "$LOCK" ] && exit 0
+touch "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
+enabled=$(uci -q get mt5700.sim.enabled); enabled=${enabled:-1}
+slot=$(uci -q get mt5700.sim.slot); slot=${slot:-0}
+[ "$enabled" = "1" ] || exit 0
+
+if /usr/bin/mt5700-simsel --status >/dev/null 2>&1; then
+	exit 0
+fi
+
+logger -t mt5700-sim-check "SIM 未就绪，尝试切换到槽位 $slot"
+/usr/bin/mt5700-simsel "$slot" >/tmp/mt5700-sim-check.log 2>&1
+logger -t mt5700-sim-check "$(tail -1 /tmp/mt5700-sim-check.log 2>/dev/null)"
+exit 0

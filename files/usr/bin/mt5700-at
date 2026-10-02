@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """mt5700-at.py — TD Tech MT5700M-CN 只读状态探针 / AT 客户端
 
-用途：
-  * 在 C8（MWRT/OpenWrt）上查模块状态，替代厂商 at-server/websocket_server；
-  * 也可作为新固件里"受控"的最小实现：一条命令拿到 JSON 状态。
+不依赖 pyserial（只用 python3-light 自带 os/termios/select），
+避免发行版里 python-pyserial 构建失败的问题。
 
 用法：
-  python3 mt5700-at.py                      # 默认走串口 /dev/ttyUSB1 拉一份状态
-  python3 mt5700-at.py --transport tcp      # 走模块自带 TCP AT（192.168.8.1:20249）
-  python3 mt5700-at.py --cmds "AT+CSQ" "AT^MONSC"
-  python3 mt5700-at.py --json
-  python3 mt5700-at.py --raw "ATI"
-
-安全：默认只发查询（'?' / '=' 结尾的只读探测除外），不写任何模块状态。
+  mt5700-at                       # 默认串口 /dev/ttyUSB1 拉一份只读状态
+  mt5700-at --transport tcp       # 走模块自带 TCP AT（192.168.8.1:20249）
+  mt5700-at --cmds "AT+CSQ" "AT^MONSC"
+  mt5700-at --json
+  mt5700-at --raw "ATI"
 """
 import argparse
 import json
+import os
 import re
+import select
 import socket
 import sys
+import termios
 import time
 
 STATUS_CMDS = [
@@ -31,6 +31,13 @@ STATUS_CMDS = [
     "AT^C5GOPTION?", "AT^FASTDORM?",
 ]
 
+sys.path.insert(0, "/usr/lib/mt5700")
+try:
+    from serialport import SerialPort, TcpPort
+except ImportError:  # 兜底：同目录部署时
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from serialport import SerialPort, TcpPort
+
 
 def parse_ati(text):
     out = {}
@@ -42,7 +49,6 @@ def parse_ati(text):
 
 
 def parse_hcsq(text):
-    """^HCSQ: "NR",52,166,30 -> 模式 + 原始索引"""
     m = re.search(r'\^HCSQ:\s*"(\w+)",\s*([\d,]+)', text)
     if not m:
         return None
@@ -51,7 +57,6 @@ def parse_hcsq(text):
 
 
 def parse_monsc(text):
-    """^MONSC: NR,460,15,504990,1,C286F8002,130,14901D,-78,-10,15"""
     m = re.search(r"\^MONSC:\s*([^\r\n]+)", text)
     if not m:
         return None
@@ -63,54 +68,24 @@ def parse_monsc(text):
     return d
 
 
-
-
 class Modem:
+    URC = ("^RSSI", "^CERSSI", "^HCSQ", "^DSFLOWRPT", "+CMTI", "+CLIP", "+C5GREG")
+
     def __init__(self, transport="serial", port="/dev/ttyUSB1", host="192.168.8.1",
                  tcp_port=20249, baud=115200, timeout=3.0):
         self.transport, self.timeout = transport, timeout
         if transport == "serial":
-            import serial  # pyserial
-            self.io = serial.Serial(port, baud, timeout=0.2)
-            self.io.reset_input_buffer()
+            self.io = SerialPort(port, baud)
         else:
-            self.io = socket.create_connection((host, tcp_port), timeout)
-            self.io.settimeout(timeout)
+            self.io = TcpPort(host, tcp_port, timeout)
 
-    def _write(self, data: bytes):
-        if self.transport == "serial":
-            self.io.write(data)
-        else:
-            self.io.sendall(data)
-
-    def _read(self):
-        if self.transport == "serial":
-            return self.io.read(4096)
-        buf = b""
-        try:
-            while True:
-                chunk = self.io.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                if b"OK" in buf or b"ERROR" in buf:
-                    break
-        except Exception:
-            pass
-        return buf
-
-    URC = ("^RSSI", "^CERSSI", "^HCSQ", "^DSFLOWRPT", "+CMTI", "+CLIP", "+C5GREG")
-
-    def cmd(self, c: str, wait=None) -> str:
-        """发一条命令，读到 OK/ERROR 为止；主动上报(URC)行单独丢弃，避免污染解析。"""
-        self._write((c + "\r").encode())
+    def cmd(self, c, wait=None):
+        self.io.reset_input_buffer()
+        self.io.write((c + "\r").encode())
         deadline = time.time() + (wait if wait is not None else self.timeout)
         buf = ""
         while time.time() < deadline:
-            try:
-                chunk = self._read()
-            except Exception:
-                break
+            chunk = self.io.read()
             if chunk:
                 buf += chunk.decode("utf-8", "replace")
                 if re.search(r"^\s*(OK|ERROR)\s*$", buf, re.M):
@@ -123,13 +98,10 @@ class Modem:
         return "\n".join(lines)
 
     def close(self):
-        try:
-            self.io.close()
-        except Exception:
-            pass
+        self.io.close()
 
 
-def collect(m: Modem, cmds, gap=0.35):
+def collect(m, cmds, gap=0.35):
     out = {}
     for c in cmds:
         out[c] = m.cmd(c, wait=gap).strip()
@@ -144,18 +116,20 @@ def main():
     ap.add_argument("--tcp-port", type=int, default=20249)
     ap.add_argument("--cmds", nargs="*")
     ap.add_argument("--raw")
-    ap.add_argument("--status", action="store_true", help="拉整套只读状态")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--gap", type=float, default=0.35)
     a = ap.parse_args()
 
-    m = Modem(a.transport, a.port, a.host, a.tcp_port, timeout=max(2.0, a.gap * 6))
+    try:
+        m = Modem(a.transport, a.port, a.host, a.tcp_port, timeout=max(2.0, a.gap * 6))
+    except Exception as e:
+        print("无法打开模块通道: %s" % e, file=sys.stderr)
+        return 1
     try:
         if a.raw:
             sys.stdout.write(m.cmd(a.raw, wait=1.0))
-            return
-        cmds = a.cmds or STATUS_CMDS
-        res = collect(m, cmds, gap=a.gap)
+            return 0
+        res = collect(m, a.cmds or STATUS_CMDS, gap=a.gap)
     finally:
         m.close()
 
@@ -199,7 +173,8 @@ def main():
     else:
         for c, r in res.items():
             print(f"### {c}\n{r}\n")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -10,20 +10,22 @@
 用法:
   mt5700-simsel --list            列出槽位表
   mt5700-simsel 6                 切到槽位 6 并等待 SIM 就绪
-  mt5700-simsel --scan            依次尝试 6/0/1/2，直到检测到 SIM（返回 0）
-  mt5700-simsel --status          只读当前 SIM/注册状态
+  mt5700-simsel --scan            依次尝试 6/0/1/2，直到检测到 SIM
+  mt5700-simsel --status          只读当前 SIM/注册状态（0=就绪）
+不依赖 pyserial。
 """
 import argparse
-import glob
 import os
 import re
 import sys
 import time
 
+sys.path.insert(0, "/usr/lib/mt5700")
 try:
-    import serial
+    from serialport import SerialPort
 except ImportError:
-    serial = None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from serialport import SerialPort
 
 SLOTS = {
     6: {"name": "外置反面SIM卡", "sel1": 1, "sel0": 1, "scichg": "0,1"},
@@ -37,8 +39,8 @@ URC_PREFIX = ("^RSSI", "^CERSSI", "^HCSQ", "^DSFLOWRPT", "+CMTI", "+CLIP", "+C5G
 
 class Modem:
     def __init__(self, port="/dev/ttyUSB1", baud=115200, timeout=4.0):
-        self.port, self.timeout = port, timeout
-        self.io = serial.Serial(port, baud, timeout=0.2)
+        self.timeout = timeout
+        self.io = SerialPort(port, baud)
 
     def cmd(self, c, wait=None):
         self.io.reset_input_buffer()
@@ -46,7 +48,7 @@ class Modem:
         deadline = time.time() + (wait if wait is not None else self.timeout)
         buf = ""
         while time.time() < deadline:
-            chunk = self.io.read(4096)
+            chunk = self.io.read()
             if chunk:
                 buf += chunk.decode("utf-8", "replace")
                 if re.search(r"^\s*(OK|ERROR)\s*$", buf, re.M):
@@ -59,10 +61,7 @@ class Modem:
         return "\n".join(lines)
 
     def close(self):
-        try:
-            self.io.close()
-        except Exception:
-            pass
+        self.io.close()
 
 
 def gpio_write(name, value):
@@ -92,7 +91,16 @@ def sim_state(m):
     return ready, cpin.strip(), simsq.strip(), creg.strip()
 
 
-def switch_slot(m, slot, settle=18):
+def at_ready(m, tries=15, gap=2):
+    """等待模块 AT 就绪（刚上电时可能没响应）"""
+    for _ in range(tries):
+        if "OK" in m.cmd("AT", wait=1.5) or m.cmd("ATI", wait=1.5):
+            return True
+        time.sleep(gap)
+    return False
+
+
+def switch_slot(m, slot, settle=25):
     s = SLOTS[slot]
     print(f"==> 切换到槽位 {slot}（{s['name']}）：cpe-sel1={s['sel1']} cpe-sel0={s['sel0']} SCICHG={s['scichg']}")
     # 厂商流程：先都置 0，再设置目标值
@@ -114,7 +122,7 @@ def switch_slot(m, slot, settle=18):
         time.sleep(3)
         ready, cpin, simsq, creg = sim_state(m)
         if ready:
-            print(f"   ✅ SIM 就绪（{cpin.splitlines()[-1] if cpin else ''} / {simsq.splitlines()[-1] if simsq else ''}）")
+            print("   ✅ SIM 就绪")
             return True
     ready, cpin, simsq, creg = sim_state(m)
     print(f"   ❌ 未检测到 SIM（{cpin.splitlines()[-1] if cpin else '无响应'} / {simsq.splitlines()[-1] if simsq else ''}）")
@@ -136,11 +144,11 @@ def main():
             print(f"  {k}: {s['name']:12s} sel1={s['sel1']} sel0={s['sel0']} SCICHG={s['scichg']}")
         return 0
 
-    if serial is None:
-        print("需要 python3-pyserial", file=sys.stderr)
+    try:
+        m = Modem(a.port)
+    except Exception as e:
+        print("无法打开 %s: %s" % (a.port, e), file=sys.stderr)
         return 1
-
-    m = Modem(a.port)
     try:
         print("GPIO:", read_gpios())
         if a.status or (a.slot is None and not a.scan):
@@ -150,8 +158,11 @@ def main():
             print("CEREG:", creg)
             print("MONSC:", m.cmd("AT^MONSC"))
             print("CGPADDR:", m.cmd("AT+CGPADDR"))
-            print("SIM 就绪:" , ready)
+            print("SIM 就绪:", ready)
             return 0 if ready else 2
+
+        if not at_ready(m):
+            print("   ⚠️ 模块 AT 无响应（可能刚上电）")
 
         if a.scan:
             for slot in SCAN_ORDER:
