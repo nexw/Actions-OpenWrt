@@ -1,0 +1,55 @@
+#!/bin/sh /etc/rc.common
+#
+# modeminfo — 为 LuCI 蜂窝面板准备“模块信息”环境
+#
+# 原版是厂商的 modeminit(START=99)，除了写 /tmp/modconf.conf 还负责
+# 开机上电、加载 USB 串口、拉起 mt5700m.sh/netmodeled.sh 的数据面配置。
+# 本设备的数据面由本仓库自己的 mt5700-* + /etc/config/network（IP 直通）负责，
+# 所以这里**只做只读的信息发布**，不碰 GPIO、不改网络、不起数据面守护：
+#
+#   /tmp/modconf.conf  ← 面板据此选模板（grep MT5700 / RM520 / RM500U）
+#   /tmp/sim_sel       ← SIM 槽位号，面板据此显示「内置/外置 SIM 卡 N」
+#
+# 之所以要单独写，是因为 luci-app-WTModem 的 controller 靠这两个文件决定渲染。
+#
+START=98
+
+AT_PORT=/dev/ttyUSB1
+AT_BIN=/usr/bin/mt5700-at
+CONF=/tmp/modconf.conf
+SIMSEL=/tmp/sim_sel
+
+# 从 mt5700-simsel 的实现里取当前槽位（没有该工具就保持缺省）
+read_simsel() {
+	local v
+	v=$(uci -q get mt5700.sim.cur 2>/dev/null) || v=
+	[ -n "$v" ] || v=$(uci -q get cpesel.sim.cur 2>/dev/null) || v=
+	echo "${v:-0}"
+}
+
+write_modconf() {
+	local line=
+	[ -x "$AT_BIN" ] || return 0
+	# ATI 第 3 行 = "Model: MT5700M-CN"，面板只 grep 关键字，整段写入即可
+	line=$("$AT_BIN" --raw "ATI" --port "$AT_PORT" 2>/dev/null | sed -n '/Model:/p' | head -1)
+	[ -n "$line" ] || line="MT5700M-CN"
+	echo "$line" > "$CONF"
+}
+
+start() {
+	# 等模块枚举出来（最多 30s），避免开机时抢跑
+	i=0
+	while [ $i -lt 30 ]; do
+		[ -e "$AT_PORT" ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+
+	write_modconf
+	[ -e "$SIMSEL" ] || read_simsel > "$SIMSEL"
+
+	logger -t modeminfo "已发布 $(cat "$CONF" 2>/dev/null) / sim_sel=$(cat "$SIMSEL" 2>/dev/null)"
+	return 0
+}
+
+boot() { start; }

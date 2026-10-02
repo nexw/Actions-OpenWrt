@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# sendat — Manper luci-app-WTModem 的 AT 发送器（可移植替代实现）
+#
+# 原版是厂商编译的 aarch64 ELF（无源码）。本实现用仓库自带的
+# /usr/bin/mt5700-at + /usr/lib/mt5700/serialport.py 复刻它的行为。
+#
+# 调用约定：
+#   sendat <端口> <AT 命令...>     # 端口 = ttyUSB 序号（1 → /dev/ttyUSB1）或完整路径
+#
+# 输出 = **纯模块响应**，不回显命令（这点很关键）：
+#   厂商的 zinfo_mt5700.sh 大量使用
+#       sendat 1 'AT^CHIPTEMP?' | grep 'CHIPTEMP' | sed -n '1p' | cut -d, -f9
+#       sendat 1 'AT^EONS=2'    | awk -F, '{print $2}'
+#   这类“取第一个匹配行”的管道；如果回显命令，`AT^CHIPTEMP?` 会先被 grep 命中，
+#   取值立刻错位（实测 OX 会变成字符串 "AT^CHIPTEMP?" → arithmetic syntax error）。
+#   所以这里与 `mt5700-at --raw` 完全一致：只输出响应，末尾补一行 OK。
+#
+set -u
+
+AT_BIN=${AT_BIN:-/usr/bin/mt5700-at}
+
+usage() {
+	echo "usage: sendat <port|/dev/ttyUSBn> <AT command...>" >&2
+	exit 1
+}
+
+[ $# -ge 2 ] || usage
+port=$1
+shift
+cmd="$*"
+
+case "$port" in
+	/*) dev=$port ;;
+	''|*[!0-9]*) echo "sendat: 端口参数无效: $port" >&2; exit 1 ;;
+	*)  dev="/dev/ttyUSB$port" ;;
+esac
+
+[ -e "$dev" ] || { echo "sendat: $dev 不存在" >&2; exit 1; }
+[ -x "$AT_BIN" ] || { echo "sendat: 找不到 $AT_BIN" >&2; exit 1; }
+
+out=$("$AT_BIN" --raw "$cmd" --port "$dev" 2>&1)
+rc=$?
+
+[ -n "$out" ] && echo "$out"
+# 收尾 OK：与真实 AT 会话一致；出错则不补，避免误导解析
+case "$out" in
+	*ERROR*) : ;;
+	*)       echo OK ;;
+esac
+
+exit $rc
