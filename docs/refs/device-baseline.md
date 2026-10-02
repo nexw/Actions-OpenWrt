@@ -149,3 +149,36 @@
 | 数据分区 | 期望 `rootfs_data` | GPT 中为 **`app_data`**（p10，256 MB） | ⚠️ 需核实 `emmc_do_upgrade` 行为，必要时打兼容补丁 |
 | LED 命名 | `blue:power / blue:indicator-0/1 / blue:wlan` | 厂商 `hc:blue:status / cmode5 / cmode4 / wifi` | 采用上游命名，GPIO 按实测 |
 | `bdinfo` nvmem | DTS 只解析了 `u-boot-env` + `factory` | `bdinfo` 为文本（fac_mac/imei/oem_pname） | 需确认 `mmc_get_mac_ascii` 的读取路径可用 |
+
+---
+
+## eMMC 分区布局与 overlay（2026-10-02 实测）
+
+`boot_system=1` → B 槽（`kernel_2nd`/`rootfs_2nd`，我们的 immortalwrt）；`0` → A 槽（`kernel`/`rootfs`，原厂固件，留作回滚）。
+
+| 分区 | GPT 标签 | 大小 | 内容 |
+|---|---|---|---|
+| p1 | `gpt` | 17K | 覆盖主 GPT 的占位分区（厂家布局，**本机没有备份 GPT**：`alt_lba=1`） |
+| p2 | `u-boot-env` | 512K | `bootargs` / `boot_system` |
+| p3 / p4 / p5 | `factory` / `bdinfo` / `fip` | 1M / 1M / 2M | 出厂 MAC / 板级信息 / ATF(BL31) |
+| p6 | `kernel` | 32M | A 槽内核（FIT） |
+| p7 | `rootfs` | 256M | A 槽 rootfs（原厂固件；可 ro 挂载取 `UpdateWizard_MT5700` 等厂家工具） |
+| p8 | `kernel_2nd` | 128M | B 槽内核（FIT） |
+| p9 | `rootfs_2nd` | 6715M | B 槽 rootfs（我们的 squashfs，实际只占 ~56MB → 6.5GB 闲置） |
+| p10 | `rootfs_data` | **250M**（原 `app_data` 256M → 缩 96M → 现 250M） | **overlay**（ext4，可写） |
+
+**overlay 说明**：固件 rootfs 是只读 squashfs；overlay 是可写层（overlayfs 合成根），`/etc/config`、安装的包、日志、自定义脚本都在这里，丢了等于恢复出厂。
+
+**为什么 p9 有 6.6G**：厂家把"第二个 rootfs"开很大，其升级脚本 `lib/upgrade/mmc.sh` 用
+`losetup -o $((rootfs_length 对齐)) $loopdev $rootfs_dev` 把镜像之后的空间挂成 `rootfs_data`
+（所以原厂实际是 ~6.5GB overlay）。上游 OpenWrt 不支持这种 loop-overlay（没有 `rootfs_data_offset`
+之类的 bootarg），因此我们用**独立分区 p10** 做 overlay。
+
+**p10 扩容（96MB → 250MB，2026-10-02）**：
+- p10 后面原本有 160MB 未分配（早前从 256MB 缩到 96MB 留下的），最大可到 **256.0MB**（= `last_usable`）
+- 直接改 GPT 里 p10 的 `ending_lba` 并重算条目数组/头 CRC：`local/gpt-grow-overlay.py`（改前已备份 GPT）
+- 重启后内核按新大小枚举（`/sys/class/block/mmcblk0p10/size` = 512000 扇区），再 `resize2fs` 即可
+- **`sysupgrade -n`（不保留配置）会自动重建 overlay**：`emmc_upgrade_tar` 会 `dd` 清零 data 分区头 8 个扇区，首次启动 fstools 按分区全尺寸格式化 → 无需手工 resize（这也是我们切换到发行版固件时采用 `-n` 的原因）
+- `.config` 已启用 `e2fsprogs`/`resize2fs`/`tune2fs`/`dumpe2fs`（注意：`.config` 里**靠后的重复项会覆盖前面的**，必须原地替换 `# CONFIG_PACKAGE_x is not set`）
+
+**注意**：切回 A 槽原厂固件回滚时，厂家逻辑可能会动 p10（它当 `app_data` 用）→ 回滚前先 `sysupgrade -b` 或本地留一份 overlay/uci 备份。
