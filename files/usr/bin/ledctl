@@ -37,6 +37,15 @@ LED_SPECS="blue:power|1 blue:indicator-0| blue:indicator-1|0 blue:wlan|"
 
 ALL_LEDS=      # 运行期展开：面板灯 + 探测到的网口灯
 
+# shell 的 $(( )) 会把带前导零的字面量当八进制解析（busybox ash 不支持 10#），
+# 所以 "08"/"09" 会直接报 arithmetic syntax error。凡是要进 $(( )) 的数字先过一遍 dec。
+dec() {
+	v=$1
+	while [ "${v#0}" != "$v" ] && [ ${#v} -gt 1 ]; do v=${v#0}; done
+	[ -n "$v" ] || v=0
+	echo "$v"
+}
+
 load_config() {
 	[ -f /etc/config/ledschedule ] || return 0
 	[ -f /lib/functions.sh ] || return 0
@@ -56,6 +65,10 @@ load_config() {
 	_collect() { _led_list="$_led_list $1"; }
 	config_list_foreach main leds _collect
 	[ -n "$(echo $_led_list)" ] && LED_SPECS="$_led_list"
+
+	# 避免 "08"/"09" 在 $(( )) 里被当八进制
+	INTERVAL=$(dec "$INTERVAL")
+	MANUAL_HOLD=$(dec "$MANUAL_HOLD")
 }
 
 # ---- LED 名 / 恢复值解析：'blue:power|1' / 'blue:indicator-0'（无 | = 交给 led 服务）----
@@ -157,7 +170,8 @@ leds_state() {
 
 # ---- 时段计算 ----
 valid_hhmm() { case "$1" in [0-2][0-9]:[0-5][0-9]) [ "${1%%:*}" -le 23 ] ;; *) return 1 ;; esac; }
-hhmm_to_min() { echo $(( ${1%%:*} * 60 + ${1##*:} )); }
+# 注意：${x#0} 去掉前导零，否则 "08"/"09" 在 $(( )) 里会被当非法八进制而报错
+hhmm_to_min() { h=${1%%:*}; m=${1##*:}; echo $(( ${h#0} * 60 + ${m#0} )); }
 
 in_off_window() {
 	[ -n "$OFF_START" ] || return 1
@@ -203,7 +217,7 @@ hold_expiry() {
 	if [ -n "$today" ]; then
 		for b in "$OFF_START" "$OFF_END"; do
 			valid_hhmm "$b" || continue
-			bt=$(( today + (${b%%:*} * 60 + ${b##*:}) * 60 ))
+			bt=$(( today + $(hhmm_to_min "$b") * 60 ))
 			if [ "$bt" -gt "$now" ] && [ "$bt" -lt "$until" ]; then until=$bt; fi
 			bt2=$(( bt + 86400 ))
 			if [ "$bt2" -gt "$now" ] && [ "$bt2" -lt "$until" ]; then until=$bt2; fi

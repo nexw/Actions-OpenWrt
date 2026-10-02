@@ -43,6 +43,15 @@ PWM_NODE=                # 实际写入的节点
 # 所以中段压低、把满速（100%）留给 85 ℃ 以上。
 CURVE="45000:25 55000:30 60000:38 65000:48 70000:60 75000:72 80000:88 85000:100"
 
+# shell 的 $(( )) 会把带前导零的字面量当八进制解析（busybox ash 不支持 10#），
+# 所以 "08"/"09" 会直接报 arithmetic syntax error。凡是要进 $(( )) 的数字先过一遍 dec。
+dec() {
+	v=$1
+	while [ "${v#0}" != "$v" ] && [ ${#v} -gt 1 ]; do v=${v#0}; done
+	[ -n "$v" ] || v=0
+	echo "$v"
+}
+
 load_config() {
 	[ -f /etc/config/fancontrol ] || return 0
 	[ -f /lib/functions.sh ] || return 0
@@ -61,6 +70,15 @@ load_config() {
 	config_get FAN_POWER_GPIO main fan_power_gpio  "$FAN_POWER_GPIO"
 	config_get KERNEL_DRIVER  main kernel_driver   "$KERNEL_DRIVER"
 	config_get CURVE          main curve           "$CURVE"
+
+	# 避免 "08"/"09" 在 $(( )) 里被当八进制
+	PERIOD_NS=$(dec "$PERIOD_NS")
+	INTERVAL=$(dec "$INTERVAL")
+	MIN_DUTY=$(dec "$MIN_DUTY")
+	MAX_DUTY=$(dec "$MAX_DUTY")
+	HYSTERESIS=$(dec "$HYSTERESIS")
+	DOWN_STEP=$(dec "$DOWN_STEP")
+	FORCE_MAX_TEMP=$(dec "$FORCE_MAX_TEMP")
 }
 
 # 内核 pwmfan 驱动是否已接管（接管后 pwm0 被驱动独占，我们不能再写）
@@ -308,6 +326,7 @@ case "${1:-status}" in
 		case "$pct" in
 			''|*[!0-9]*) echo "用法: fanctl set <1-100>" >&2; exit 1 ;;
 		esac
+		pct=$(dec "$pct")
 		resolve_pwm
 		case "$PWM_MODE" in
 			none)  echo "PWM 通路不可用（pwm0 与 pwmfan/pwm1 都没有）" >&2; exit 1 ;;
