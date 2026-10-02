@@ -1,0 +1,278 @@
+#!/bin/sh
+#
+# fanctl — NRadio C8 (WT9104 / C8-688) PWM 风扇温控（userspace 兜底实现）
+#
+# 背景：DTS 里已有 pwm-fan 节点（pwmchip0/pwm0，25 kHz），但现网镜像未带
+#       kmod-hwmon-pwmfan，且 cpu-thermal 的 cooling-maps 只绑了 WiFi，没绑风扇，
+#       所以内核温控不会驱动风扇。本脚本用 userspace 闭环补上这一段。
+#
+# 若将来镜像带上了 pwmfan 驱动（/sys/class/hwmon/*/name == pwmfan），
+# 脚本会自动让位，只在 status 里显示内核侧状态，不与内核 governor 抢 pwm0。
+#
+# 用法：
+#   fanctl daemon        前台常驻温控循环（由 /etc/init.d/fancontrol 经 procd 拉起）
+#   fanctl status        打印温度 / 占空比 / 风扇供电 / 控制模式
+#   fanctl set <pct>     手动设置占空比（1-100，下次温控循环会被纠正）
+#   fanctl temp          只打印 CPU 温度（摄氏度）
+#   fanctl curve         打印当前生效的温度-转速曲线
+#
+# 注意：不要用 set -u —— /lib/functions.sh 里引用了未定义的 $IPKG_INSTROOT
+
+STATE=/var/run/fanctl.state
+
+# ---- 默认值（可被 /etc/config/fancontrol 覆盖）----
+TEMP_ZONE=/sys/class/thermal/thermal_zone0/temp
+PWM_CHIP=/sys/class/pwm/pwmchip0
+PWM_DIR=/sys/class/pwm/pwmchip0/pwm0
+PERIOD_NS=40000          # 25 kHz
+INTERVAL=10              # 轮询秒数
+MIN_DUTY=25              # 下限，太低风扇不转（堵转保护）
+MAX_DUTY=100
+HYSTERESIS=3000          # 迟滞 3.0 ℃，避免在阈值附近来回抖
+DOWN_STEP=10             # 每次最多降 10%，抑制转速突变啸叫
+FORCE_MAX_TEMP=95000     # 超过则立即 100%
+FAN_POWER_GPIO=/sys/class/gpio/fan-hw/value
+# temp_md:duty%  升序；中间线性插值。
+# 实机参考：原先只有开机 50% 兜底时空载 ~77 ℃；按本曲线空载稳定在 ~71-72 ℃（≈68%），
+# 所以中段压低、把满速（100%）留给 85 ℃ 以上。
+CURVE="45000:25 55000:30 60000:38 65000:48 70000:60 75000:72 80000:88 85000:100"
+
+load_config() {
+	[ -f /etc/config/fancontrol ] || return 0
+	[ -f /lib/functions.sh ] || return 0
+	. /lib/functions.sh
+	config_load fancontrol
+	config_get TEMP_ZONE      main temp_zone       "$TEMP_ZONE"
+	config_get PWM_DIR        main pwm_dir         "$PWM_DIR"
+	config_get PWM_CHIP       main pwm_chip        "$PWM_CHIP"
+	config_get PERIOD_NS      main period_ns       "$PERIOD_NS"
+	config_get INTERVAL       main interval        "$INTERVAL"
+	config_get MIN_DUTY       main min_duty        "$MIN_DUTY"
+	config_get MAX_DUTY       main max_duty        "$MAX_DUTY"
+	config_get HYSTERESIS     main hysteresis      "$HYSTERESIS"
+	config_get DOWN_STEP      main down_step       "$DOWN_STEP"
+	config_get FORCE_MAX_TEMP main force_max_temp  "$FORCE_MAX_TEMP"
+	config_get FAN_POWER_GPIO main fan_power_gpio  "$FAN_POWER_GPIO"
+	config_get CURVE          main curve           "$CURVE"
+}
+
+# 内核 pwmfan 驱动是否已接管（接管后 pwm0 被驱动独占，我们不能再写）
+kernel_fan_hwmon() {
+	for h in /sys/class/hwmon/hwmon*; do
+		[ -r "$h/name" ] || continue
+		[ "$(cat "$h/name" 2>/dev/null)" = "pwmfan" ] && { echo "$h"; return 0; }
+	done
+	return 1
+}
+
+read_temp() {
+	t=$(cat "$TEMP_ZONE" 2>/dev/null)
+	case "$t" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	echo "$t"
+}
+
+ensure_fan_power() {
+	[ -w "$FAN_POWER_GPIO" ] || return 0
+	[ "$(cat "$FAN_POWER_GPIO" 2>/dev/null)" = "1" ] || echo 1 > "$FAN_POWER_GPIO" 2>/dev/null
+	return 0
+}
+
+ensure_pwm() {
+	[ -d "$PWM_DIR" ] || { echo 0 > "$PWM_CHIP/export" 2>/dev/null; sleep 1; }
+	[ -d "$PWM_DIR" ] || return 1
+
+	if [ "$(cat "$PWM_DIR/period" 2>/dev/null)" != "$PERIOD_NS" ]; then
+		# 改周期前先把占空比压到新周期上限，否则 duty>period 会被内核拒绝
+		echo "$PERIOD_NS" > "$PWM_DIR/duty_cycle" 2>/dev/null
+		echo "$PERIOD_NS" > "$PWM_DIR/period" 2>/dev/null
+	fi
+	[ "$(cat "$PWM_DIR/enable" 2>/dev/null)" = "1" ] || echo 1 > "$PWM_DIR/enable" 2>/dev/null
+	return 0
+}
+
+# 百分比 -> ns 并写入；写失败返回非 0（调用方保留旧档位，不会盲目更新状态）
+set_duty_pct() {
+	pct=$1
+	[ "$pct" -lt 0 ] && pct=0
+	[ "$pct" -gt 100 ] && pct=100
+	ns=$(( PERIOD_NS * pct / 100 ))
+	echo "$ns" > "$PWM_DIR/duty_cycle" 2>/dev/null || return 1
+	return 0
+}
+
+# 温度 -> 目标占空比（曲线线性插值）
+duty_for_temp() {
+	t=$1
+	prev_t= prev_d= out=$MIN_DUTY
+	for pt in $CURVE; do
+		tt=${pt%%:*}
+		dd=${pt##*:}
+		if [ "$t" -le "$tt" ]; then
+			if [ -n "$prev_t" ] && [ "$tt" -gt "$prev_t" ]; then
+				out=$(( prev_d + (dd - prev_d) * (t - prev_t) / (tt - prev_t) ))
+			else
+				out=$dd
+			fi
+			echo "$out"
+			return
+		fi
+		prev_t=$tt
+		prev_d=$dd
+		out=$dd
+	done
+	echo "$out"
+}
+
+clamp_duty() {
+	d=$1
+	[ "$d" -lt "$MIN_DUTY" ] && d=$MIN_DUTY
+	[ "$d" -gt "$MAX_DUTY" ] && d=$MAX_DUTY
+	echo "$d"
+}
+
+log() {
+	logger -t fanctl "$*" 2>/dev/null
+	# 只有交互式前台运行时才回显，避免 procd 下 stdout + syslog 双份日志
+	[ -t 1 ] && echo "$(date '+%F %T') $*"
+	return 0
+}
+
+cmd_status() {
+	hz=$(kernel_fan_hwmon) || hz=
+	t=$(read_temp) || t=
+	pwm_ns=$(cat "$PWM_DIR/duty_cycle" 2>/dev/null)
+	period=$(cat "$PWM_DIR/period" 2>/dev/null)
+	en=$(cat "$PWM_DIR/enable" 2>/dev/null)
+	pwr=$(cat "$FAN_POWER_GPIO" 2>/dev/null)
+
+	if [ -n "$hz" ]; then
+		mode="kernel-pwmfan ($hz)"
+	else
+		mode=userspace-fanctl
+	fi
+
+	printf 'mode       : %s\n' "$mode"
+	if [ -n "$t" ]; then
+		printf 'cpu temp   : %s.%s C\n' "$((t / 1000))" "$((t % 1000 / 100))"
+	else
+		printf 'cpu temp   : (读取失败 %s)\n' "$TEMP_ZONE"
+	fi
+	if [ -n "$period" ] && [ -n "$pwm_ns" ] && [ "$period" -gt 0 ]; then
+		printf 'pwm duty   : %s ns / %s ns = %s%%  (enabled=%s)\n' \
+			"$pwm_ns" "$period" "$((pwm_ns * 100 / period))" "${en:-?}"
+	else
+		printf 'pwm duty   : (pwm0 未就绪)\n'
+	fi
+	printf 'fan power  : gpio %s\n' "${pwr:-?}"
+	if [ -s "$STATE" ]; then
+		printf 'last tick  : %s\n' "$(cat "$STATE")"
+	fi
+	[ -n "$t" ] && printf 'target duty: %s%%\n' "$(clamp_duty "$(duty_for_temp "$t")")"
+}
+
+cmd_curve() {
+	printf 'interval=%ss  hysteresis=%s md  min=%s%%  max=%s%%  down_step=%s%%\n' \
+		"$INTERVAL" "$HYSTERESIS" "$MIN_DUTY" "$MAX_DUTY" "$DOWN_STEP"
+	printf '%-8s %s\n' "temp(C)" "duty(%)"
+	for pt in $CURVE; do
+		tt=${pt%%:*}
+		printf '%-8s %s\n' "$((tt / 1000))" "${pt##*:}"
+	done
+}
+
+cmd_daemon() {
+	if hz=$(kernel_fan_hwmon); then
+		log "检测到内核 pwmfan 驱动（$hz），内核温控已接管，fanctl 退出"
+		return 0
+	fi
+	if ! ensure_pwm; then
+		log "错误：$PWM_DIR 不可用，风扇温控未启动"
+		return 1
+	fi
+	ensure_fan_power
+
+	cur=$(cat "$PWM_DIR/duty_cycle" 2>/dev/null)
+	cur=$(( ${cur:-0} * 100 / PERIOD_NS ))
+	log "温控启动 interval=${INTERVAL}s min=${MIN_DUTY}% max=${MAX_DUTY}% 起始=${cur}%"
+
+	while :; do
+		# 运行期内核 pwmfan 驱动上线（例如手动 modprobe）则让位，避免抢 pwm0
+		if hz=$(kernel_fan_hwmon); then
+			log "检测到内核 pwmfan 驱动（$hz）上线，fanctl 退出并让位"
+			return 0
+		fi
+		ensure_fan_power
+		if ! t=$(read_temp); then
+			# 温度读不到：宁可信其热，拉满并告警，不要静默失控
+			want=$MAX_DUTY
+			reason="温度读取失败，保守拉满"
+		elif [ "$t" -ge "$FORCE_MAX_TEMP" ]; then
+			want=$MAX_DUTY
+			reason="温度越过 $((FORCE_MAX_TEMP / 1000))C 硬阈值"
+		else
+			want=$(duty_for_temp "$t")
+			# 迟滞：只有当"温度+迟滞"对应的档位都低于当前档位时才允许降速
+			down=$(duty_for_temp $(( t + HYSTERESIS )))
+			if [ "$want" -lt "$cur" ] && [ "$down" -ge "$cur" ]; then
+				want=$cur
+			fi
+			# 降速限幅
+			if [ "$want" -lt "$cur" ]; then
+				lim=$(( cur - DOWN_STEP ))
+				[ "$want" -lt "$lim" ] && want=$lim
+			fi
+			reason=
+		fi
+		want=$(clamp_duty "$want")
+
+		if [ "$want" != "$cur" ]; then
+			if set_duty_pct "$want"; then
+				if [ -n "$reason" ]; then
+					log "temp=${t:-?}md duty: ${cur}% -> ${want}%  ($reason)"
+				else
+					log "temp=${t}md($((t / 1000)).$((t % 1000 / 100))C) duty: ${cur}% -> ${want}%"
+				fi
+				cur=$want
+			else
+				log "写入 pwm0/duty_cycle 失败（want=${want}%），保持 ${cur}%"
+			fi
+		fi
+		echo "temp=${t:-na}md duty=${cur}%" > "$STATE" 2>/dev/null
+		sleep "$INTERVAL"
+	done
+}
+
+load_config
+case "${1:-status}" in
+	daemon) cmd_daemon ;;
+	status) cmd_status ;;
+	curve)  cmd_curve ;;
+	temp)
+		t=$(read_temp) || exit 1
+		printf '%s.%s\n' "$((t / 1000))" "$((t % 1000 / 100))"
+		;;
+	set)
+		pct=${2:-}
+		case "$pct" in
+			''|*[!0-9]*) echo "用法: fanctl set <1-100>" >&2; exit 1 ;;
+		esac
+		ensure_pwm || { echo "pwm0 不可用" >&2; exit 1; }
+		ensure_fan_power
+		set_duty_pct "$pct" || { echo "写入失败" >&2; exit 1; }
+		log "手动设置 duty=${pct}%"
+		cmd_status
+		;;
+	*)
+		cat >&2 <<-'EOF'
+		用法:
+		  fanctl [status]     打印温度 / 占空比 / 风扇供电 / 控制模式
+		  fanctl curve        打印当前生效的温度-转速曲线
+		  fanctl temp         只打印 CPU 温度（摄氏度）
+		  fanctl set <1-100>  手动设置占空比（下次温控循环会被曲线纠正）
+		  fanctl daemon       前台常驻温控循环（由 procd 拉起）
+		EOF
+		exit 1
+		;;
+esac

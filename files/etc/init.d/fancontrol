@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+#
+# fancontrol — NRadio C8 PWM 风扇温控服务（procd 托管，崩溃自动重启）
+#
+# START=96 表示在 fanfallback(95) 之后启动：fanfallback 只做开机 50% 兜底，
+# 本服务随后按温度曲线接管。
+#
+START=96
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	# 内核 pwmfan 驱动已接管则不再插手（fanctl 自己也会判断，这里提前退出更干净）
+	for h in /sys/class/hwmon/hwmon*; do
+		[ -r "$h/name" ] || continue
+		if [ "$(cat "$h/name" 2>/dev/null)" = "pwmfan" ]; then
+			logger -t fancontrol "内核 pwmfan 驱动已接管，跳过 userspace 温控"
+			return 0
+		fi
+	done
+
+	procd_open_instance
+	procd_set_param command /usr/bin/fanctl daemon
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param limits core="unlimited"
+	procd_close_instance
+}
+
+stop_service() {
+	# 退出温控时把风扇停在"安全档"，避免停服务后风扇全速/停转
+	[ -x /usr/bin/fanctl ] && /usr/bin/fanctl set 60 >/dev/null 2>&1
+	logger -t fancontrol "已停止，风扇置于 60% 安全档"
+}

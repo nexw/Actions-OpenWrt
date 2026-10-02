@@ -1,0 +1,22 @@
+config fancontrol 'main'
+	# userspace 温控轮询间隔（秒）
+	option interval '10'
+	# CPU 温度源（毫摄氏度）
+	option temp_zone '/sys/class/thermal/thermal_zone0/temp'
+	# PWM 通道
+	option pwm_chip '/sys/class/pwm/pwmchip0'
+	option pwm_dir '/sys/class/pwm/pwmchip0/pwm0'
+	# 25 kHz，不改就与 DTS 里 pwm-fan 的 period 一致
+	option period_ns '40000'
+	# 转速下限（防止风扇堵转/停转）与上限
+	option min_duty '25'
+	option max_duty '100'
+	# 降速迟滞（毫摄氏度）与单次最大降幅（百分点）
+	option hysteresis '3000'
+	option down_step '10'
+	# 硬阈值：超过则立刻 100%（毫摄氏度）
+	option force_max_temp '95000'
+	# 风扇供电 GPIO（gpio-export 名为 fan-hw）
+	option fan_power_gpio '/sys/class/gpio/fan-hw/value'
+	# 温度-转速曲线，"毫摄氏度:百分比" 升序，中间线性插值
+	option curve '45000:25 55000:30 60000:38 65000:48 70000:60 75000:72 80000:88 85000:100'

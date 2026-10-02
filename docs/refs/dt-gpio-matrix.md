@@ -4,6 +4,16 @@
 - **官方固件** `C8-688-WT9104_1.9.4.n2.c3_flash.bin` → 内嵌板级 DTB，`model = "HC-WT9104"`，`compatible = "HCMT7981-EMMC","mediatek,mt7981-emmc-rfb"`
 - **现网固件** Manper Mwrt 5.1.0 → `/sys/firmware/fdt`（厂商魔改版）
 - **上游** immortalwrt master `mt7981b-nradio-c8-668gl.dts`
+- **设备自带 A 槽官方固件**（2026-10-02 补挖，最权威：它就是本机原厂出货的那份）
+  `OpenWrt 21.02-SNAPSHOT 1.9.4.n1.c6`，kernel 在 `mmcblk0p6` 的 FIT 里，
+  `images/fdt-1` description = `ARM64 OpenWrt nradio-wt9104 device tree blob`，
+  `model = "HC-WT9104"`。复现：
+  ```sh
+  ssh root@192.168.66.1 'dd if=/dev/mmcblk0p6 bs=1k count=4096' > aslot-kernel.img
+  python3 -c "import struct;d=open('aslot-kernel.img','rb').read();o=d.find(b'\\xd0\\x0d\\xfe\\xed',0x100000);print(hex(o),struct.unpack('>I',d[o+4:o+8])[0])"
+  # 按上一步的 offset/size 切出 dtb，再用 dtc -I dtb -O dts 反编译
+  ```
+  产物不入库（`.gitignore` 里有 `aslot-official-wt9104.dts`），约定同 `vendor-fdt.dts`。
 
 ## 1. 按键（gpio-keys）
 
@@ -17,12 +27,35 @@
 
 ## 2. LED（gpio-leds）
 
-| 用途 | 官方 / 现网标签 | GPIO | 上游 DTS | 结论 |
-|---|---|---|---|---|
-| 状态 | `hc:blue:status` | pio **10** | `blue:power` = pio 10 | GPIO 一致 |
-| 组网模式 5 | `hc:blue:cmode5` | pio **11** | `blue:indicator-0` = pio 11 | GPIO 一致 |
-| 组网模式 4 | `hc:blue:cmode4` | pio **12** | `blue:indicator-1` = pio 12 | GPIO 一致 |
-| WiFi | `hc:blue:wifi` | pio **34**(0x22) | `blue:wlan` = **pio 13** ❌ | **上游 GPIO 错误，必须改为 34** |
+四份来源三处一致，**未发现 GPIO 定义出入**：
+
+| 用途 | 设备自带官方 DTB `HC-WT9104` | 官方 flash.bin DTB | 现网 Manper | 上游 DTS | 我们仓库 DTS | 实测 |
+|---|---|---|---|---|---|---|
+| 状态/电源 | pio **10** (0x0a) AL | pio **10** | pio **10** | `blue:power` pio **10** | pio **10** | ❌ 脚在动、灯不亮（见 §2.1） |
+| 组网模式 5 | pio **11** (0x0b) AL | pio 11 | pio 11 | `blue:indicator-0` pio 11 | pio 11 | ✅ 正常 |
+| 组网模式 4 | pio **12** (0x0c) AL | pio 12 | pio 12 | `blue:indicator-1` pio 12 | pio 12 | ✅ 正常 |
+| WiFi | pio **34** (0x22) AL | pio 34 | pio 34 | pio **13** ❌ | pio **34** ✅ | ✅ 正常 |
+| `wps` 按键 | pio **9** (0x09) AL | pio 9 | ❌ 缺 | pio 9 | pio 9 | 脚在，实物未见按键 |
+
+> 上游 DTS 的 WiFi LED `pio 13` 是错的（本机实测 `pio 34`），由 `patches/0001` 修正。
+> `wps = pio 9` 官方 DTB 里确实存在（Manper 版被删），所以保留它是正确的。
+
+### 2.1 `blue:power` / pio10：软件无问题，灯不响应
+
+2026-10-02 实测结论（软件侧已排除干净）：
+
+| 检查 | 结果 |
+|---|---|
+| 写 `brightness=1` | `gpio-10` → `out lo` |
+| 写 `brightness=0` | `gpio-10` → `out hi` |
+| `trigger=timer` 1s/1s | pin10 每秒 lo/hi 交替（即 blink 时确实在翻转） |
+| pinmux | `pin 10 (WO_JTAG_JTDI): GPIO`，未被外设占用 |
+| pinconf | 与能正常点亮的 pin11/pin12 **完全一致**（2 mA、output enabled、pulldown） |
+| 其它空闲脚扫描 | pio 0/3/4/5/6/9/26/35 逐个驱动，均未点亮该灯 |
+
+→ 三份 DTB 都写 pio10、且 pio10 电平确实在翻转，**但实物不亮**。
+最可能是**该颗 LED 未贴片/损坏**，或实物丝印为 Power 的灯不走 pio10（DTB 与实际板级 net 不符）。
+待确认，勿在无实测依据时改 DTS。
 
 ## 3. GPIO 导出（板级电源/风扇/模块选择）
 

@@ -40,3 +40,45 @@ config command
 	option command '/usr/bin/mt5700-simsel --status'
 	option param '0'
 	option public '0'
+
+config command
+	option name '风扇：温控状态'
+	option command '/usr/bin/fanctl status'
+	option param '0'
+	option public '0'
+
+config command
+	option name '风扇：温度-转速曲线'
+	option command '/usr/bin/fanctl curve'
+	option param '0'
+	option public '0'
+
+config command
+	option name '风扇：手动设定转速（参数 1-100）'
+	option command '/usr/bin/fanctl set'
+	option param '1'
+	option public '0'
+
+config command
+	option name 'LED：定时熄灯状态'
+	option command '/usr/bin/ledctl status'
+	option param '0'
+	option public '0'
+
+config command
+	option name 'LED：立即关灯（手动覆盖）'
+	option command '/usr/bin/ledctl off'
+	option param '0'
+	option public '0'
+
+config command
+	option name 'LED：立即开灯（手动覆盖）'
+	option command '/usr/bin/ledctl on'
+	option param '0'
+	option public '0'
+
+config command
+	option name 'LED：取消手动覆盖，恢复定时'
+	option command '/usr/bin/ledctl auto'
+	option param '0'
+	option public '0'

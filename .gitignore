@@ -13,6 +13,7 @@ backups/
 *.pcap
 deep-c8/
 vendor-fdt.dts
+aslot-official-wt9104.dts
 
 # 密钥与凭据
 *.pem

@@ -1,0 +1,27 @@
+config ledschedule 'main'
+	# 是否启用定时熄灯（0 = 完全不干预 LED）
+	option enabled '1'
+	# 关灯时段（本地时间 HH:MM，支持跨零点，如 22:30 -> 07:00）
+	option off_start '00:00'
+	option off_end '06:00'
+	# 轮询间隔（秒）：兜底 NTP 校时跳变、开机时刻、时段边界
+	option interval '60'
+	# 手动 `ledctl on/off` 的最长保持时间（分钟）；0 = 一直保持到下一个时段边界
+	option manual_hold '60'
+	# 自动探测网口(RJ45)灯：当前 MT7531 固件无软件通路，默认为空操作，
+	# 将来 DTS/驱动补齐后无需改配置即可自动纳入
+	option auto_eth_leds '1'
+
+	# 受控 LED：sysfs 名[|恢复亮度]
+	#   带 |亮度  -> 「开灯」时直接写该亮度（适合 /etc/config/system 没声明的灯）
+	#   不带 |    -> 「开灯」时交给 /etc/init.d/led start 按 /etc/config/system 重建
+	#               （netdev 这类需要 device_name/mode 的复杂 trigger 走这条）
+	# 关灯前的 trigger/device_name 会快照到 /var/run/ledschedule.leds，开灯时精确还原。
+	list leds 'blue:power|1'
+	list leds 'blue:indicator-0'
+	list leds 'blue:indicator-1|0'
+	list leds 'blue:wlan'
+	# WiFi 射频指示灯（mt76）。它们平时就是暗的，且 trigger 由 mt76 设为
+	# phy0tpt/phy1tpt（流量闪烁），按需开启：
+	# list leds 'mt76-phy0|0'
+	# list leds 'mt76-phy1|0'

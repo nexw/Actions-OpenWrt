@@ -53,6 +53,115 @@
 - `etc/uci-defaults/99-nradio-c8-defaults`：LAN `192.168.66.1`、hostname `C8`、时区 CST-8
 - `etc/hotplug.d/usb/20-mt5700-serial`：把模块 5 个 `ff/06` 接口绑定到 usb-serial
 - `usr/bin/mt5700-at`：只读 AT 状态探针（`mt5700-at --json` / `--transport tcp` / `--raw "AT+CSQ"`）
+- `usr/bin/fanctl` + `etc/init.d/fancontrol` + `etc/config/fancontrol`：PWM 风扇温控（见下节）
+- `usr/bin/ledctl` + `etc/init.d/ledschedule` + `etc/config/ledschedule`：指示灯夜间定时熄灯（见下节）
+
+## 风扇温控（userspace 兜底）
+
+DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但**现网镜像没有真正带上驱动**：
+`.config` 虽然选了 `kmod-hwmon-pwmfan`，实机却查不到 `pwmfan` hwmon（`/lib/modules` 里既无
+`pwm-fan.ko` 也不是 builtin），且 `cpu-thermal` 的 `cooling-maps` 只绑了 WiFi/未绑风扇，
+内核 governor 不会驱动风扇。为不阻塞使用，仓库用 userspace 闭环补上这一段：
+
+- `usr/bin/fanctl`：读 `thermal_zone0` → 查曲线（线性插值）→ 写 `pwm0/duty_cycle`。
+  带 **3 ℃ 迟滞**、单次最多降 **10%**（抑制转速突变啸叫）、**>95 ℃ 直接拉满**、
+  **温度读失败时保守拉满**、开机自动补齐 `period/enable` 与 `fan-hw` 供电；
+  若检测到内核 `pwmfan` 驱动上线（含运行期上线）会**自动让位**，不与内核 governor 抢 `pwm0`。
+- `etc/init.d/fancontrol`：procd 托管（退出后 5 s 重启，1 h 内最多 5 次），`START=96`
+  （在 95 的 `fanfallback` 之后接管）。
+- `etc/config/fancontrol`：间隔、曲线、下限/上限、迟滞、降幅、硬阈值均可调。
+
+默认温度-转速曲线（实机实测：原先只有开机 50% 兜底时空载 ~77 ℃；启用本曲线后空载
+稳定在 ~71–72 ℃、对应 68% 左右，余量留给 85 ℃ 以上）：
+
+| 温度 | 45 ℃ | 55 ℃ | 60 ℃ | 65 ℃ | 70 ℃ | 75 ℃ | 80 ℃ | ≥85 ℃ |
+|---|---|---|---|---|---|---|---|---|
+| 占空比 | 25% | 30% | 38% | 48% | 60% | 72% | 88% | 100% |
+
+常用操作：
+
+```sh
+fanctl status     # 模式 / CPU 温度 / 当前占空比 / 风扇供电 / 目标档位
+fanctl curve      # 查看生效曲线
+fanctl set 80     # 手动打到 80%（下一个温控循环会按曲线纠正）
+uci set fancontrol.main.interval='5' && uci commit fancontrol
+/etc/init.d/fancontrol restart
+```
+
+LuCI 里也预置了三个「风扇」快捷命令（`luci-app-commands` → 系统 → 命令）。
+
+> **后续修法（需重新构建并实机验证）**：给 `cpu-thermal` 的 `cooling-maps` 增加风扇
+> `cooling-device = <&fan ...>`，并确认 `kmod-hwmon-pwmfan` 真的进了镜像，即可交回内核
+> governor 管理；`fancontrol` 检测到 hwmon 后会自动让位。
+> 注：`patches/0001` 把 `fan-fg` 写成 `gpio-export,output=<1>`，实测为输出、读不到转速，
+> 想要 tach 反馈需改成 input；本脚本因此不使用转速反馈。
+
+## 指示灯控制（夜间定时熄灯）
+
+默认 **00:00–06:00 关闭全部面板指示灯**，避免夜里影响睡眠。
+
+| LED | sysfs | 引脚 | 平时由谁点亮 | 可控 |
+|---|---|---|---|---|
+| 电源/状态 | `blue:power` | pio10 | **只在开机时由 `/etc/diag.sh` → `set_state done` 点亮一次**，之后无人管理 | ✅ |
+| 组网模式 5 / 5G | `blue:indicator-0` | pio11 | `led_5g`（netdev 跟随 `eth1`） | ✅ |
+| 组网模式 4 | `blue:indicator-1` | pio12 | 无（保持熄灭） | ✅ |
+| WiFi | `blue:wlan` | pio34 | `led_wifi`（netdev 跟随 `phy1-ap0`） | ✅ |
+| RJ45 网口灯 | — | MT7531 LED 引脚 | 硬件 link/act | ❌ 见下 |
+
+**`blue:power` 的完整控制链（重要）**：
+
+1. 硬件：MT7981 pinctrl `pio10`，DT flag `0x01` = `GPIO_ACTIVE_LOW`
+   （与官方 DTB 的 `hc:blue:status` 一致），由 `leds-gpio` 接管为 `/sys/class/leds/blue:power`。
+2. 开机：DT aliases 把 `led-boot`/`led-failsafe`/`led-running`/`led-upgrade` **全部指向 `&led_power`**，
+   `/etc/init.d/done`(START=95) 调 `. /etc/diag.sh; set_state done`：先 `status_led_off`，
+   再因为 `boot == running` 跳过 trigger 还原、直接 `status_led_on` → `trigger=none, brightness=1`。
+3. 之后：`/etc/config/system` 里 **没有** `blue:power` 的 led 段（`uci show system` 里 0 条），
+   内核 `trigger=none`，`/etc/init.d/led start` 也不会碰它 —— **它是「开机点一次就不再变」的静态灯**，
+   被夜里关掉后也不会自己恢复（diag 只在开机跑）。
+4. 现在：只有 `ledctl`/`ledschedule` 会在 00:00–06:00 关它、到点再点亮，以及手动 `ledctl on/off`。
+
+把 `blue:power` 纳入 `ledschedule.main.leds` 正是为了补上第 3 条的缺口。
+
+- `usr/bin/ledctl`：关灯时逐灯 `trigger=none` + `brightness=0`；开灯时**先让
+  `/etc/init.d/led start` 按 `/etc/config/system` 重建 netdev 灯，再按熄灯前快照还原
+  其余灯的 trigger/device_name**，所以开灯后与熄灯前完全一致（已实测往返一致）。
+- `etc/init.d/ledschedule`：procd 托管，`START=97`（在 `led`(96) 之后），**每 60 s 轮询**
+  而不用 cron——这样开机时刻、NTP 校时跳变、跨零点时段都能正确兜底。
+- `etc/config/ledschedule`：时段、轮询间隔、手动覆盖时长、受控 LED 列表均可调；
+  守护进程每个 tick 重读一次 uci，改完配置无需重启服务即可生效。
+
+```sh
+ledctl status      # 时段 / 模式 / 每个 LED 的 trigger、brightness、恢复来源
+ledctl schedule    # 只看熄灯时段与当前应处状态
+ledctl off         # 立刻关灯（手动覆盖）
+ledctl on          # 立刻开灯（手动覆盖）
+ledctl auto        # 取消手动覆盖，立即按时段执行
+ledctl toggle
+ledctl blink blue:power 20   # 让某颗灯闪 20 s，用来辨认面板上到底是哪一颗
+```
+
+手动覆盖不会一直卡住：到期时间 = `min(现在 + manual_hold 分钟, 下一个时段边界)`，
+默认 60 分钟；`manual_hold=0` 表示保持到下一个时段边界。
+
+时段支持跨零点（`option off_start '22:30'` + `option off_end '07:00'`）；
+`off_start == off_end` 视为关闭该功能。LuCI 里也预置了 4 条「LED」快捷命令。
+
+### 关于网口（RJ45）LED
+
+网口灯由 **MT7531 交换芯片的 LED 引脚**驱动，**当前固件没有任何软件通路**，已实测确认：
+
+1. 内核无 mt7530 LED 支持（`/proc/kallsyms` 里 59 个 `mt7530_*` 符号，LED 相关为 0）；
+2. DTS 的 `switch@1f`（`mediatek,mt7531`）下没有 `leds` 子节点；
+3. 没有 switch LED trigger 模块（`/sys/class/leds/*/trigger` 只有
+   `none/timer/heartbeat/default-on/netdev/pattern/mmc0/phy*`；`.config` 里只开了
+   `kmod-ledtrig-gpio`/`-network`）。
+
+所以网口灯目前就是硬件默认的 link/act，**关不掉**。脚本已预留自动探测：`option auto_eth_leds '1'`
+会扫描 `/sys/class/leds` 中名字或 `device_name` 匹配 `lan*/wan*/eth*` 的灯，将来 DTS + 内核
+补齐后无需改配置就会自动纳入熄灯范围（现在为空操作）。
+
+> 若要真正控制网口灯，需要：给 `switch@1f` 加 `leds` 子节点（`led@0/1/2` + `color`/`function`）
+> 并确认内核带 MT7530 LED 支持，然后重新构建刷机验证。
 
 ## 使用
 

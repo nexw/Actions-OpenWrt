@@ -1,0 +1,368 @@
+#!/bin/sh
+#
+# ledctl — NRadio C8 (WT9104 / C8-688) 面板/网口指示灯控制 + 夜间定时熄灯
+#
+# 能控制什么：
+#   * 面板 GPIO 灯（leds-gpio）：blue:power(10) / blue:indicator-0(11) /
+#     blue:indicator-1(12) / blue:wlan(34)          —— 可用
+#   * WiFi 射频指示灯：mt76-phy0 / mt76-phy1        —— 可用
+#   * 网口（RJ45）灯：由 MT7531 交换芯片的 LED 引脚驱动，当前固件**没有**
+#     软件通路（内核无 mt7530 LED 支持、DTS 的 switch@1f 无 leds 子节点、
+#     也没有 switch LED trigger 模块）。脚本会自动探测，将来有了就自动纳入
+#     （见 auto_eth_leds），现在为空操作。
+#
+# 用法：
+#   ledctl            等价 status
+#   ledctl status     打印时段/模式/每个 LED 的当前状态
+#   ledctl off        立刻关灯（手动覆盖，到下次时段边界或 manual_hold 后自动恢复）
+#   ledctl on         立刻开灯（同上）
+#   ledctl auto       取消手动覆盖，立即按时段执行
+#   ledctl toggle     在开/关之间切换
+#   ledctl blink [led名] [秒数]  让指定（默认全部）LED 闪烁，用来识别面板灯
+#   ledctl schedule   只打印熄灯时段与下一次切换时间
+#   ledctl daemon     前台常驻（由 /etc/init.d/ledschedule 经 procd 拉起）
+#
+# 注意：不要用 set -u —— /lib/functions.sh 里引用了未定义的 $IPKG_INSTROOT
+
+STATE=/var/run/ledschedule.state
+
+# ---- 默认值（可被 /etc/config/ledschedule 覆盖）----
+ENABLED=1
+OFF_START=00:00
+OFF_END=06:00
+INTERVAL=60
+MANUAL_HOLD=60
+AUTO_ETH_LEDS=1
+LED_SPECS="blue:power|1 blue:indicator-0| blue:indicator-1|0 blue:wlan|"
+
+ALL_LEDS=      # 运行期展开：面板灯 + 探测到的网口灯
+
+load_config() {
+	[ -f /etc/config/ledschedule ] || return 0
+	[ -f /lib/functions.sh ] || return 0
+	if [ -z "$_FN_LOADED" ]; then
+		. /lib/functions.sh
+		_FN_LOADED=1
+	fi
+	config_load ledschedule
+	config_get_bool ENABLED   main enabled        "$ENABLED"
+	config_get OFF_START      main off_start      "$OFF_START"
+	config_get OFF_END        main off_end        "$OFF_END"
+	config_get INTERVAL       main interval       "$INTERVAL"
+	config_get MANUAL_HOLD    main manual_hold    "$MANUAL_HOLD"
+	config_get_bool AUTO_ETH_LEDS main auto_eth_leds "$AUTO_ETH_LEDS"
+
+	_led_list=
+	_collect() { _led_list="$_led_list $1"; }
+	config_list_foreach main leds _collect
+	[ -n "$(echo $_led_list)" ] && LED_SPECS="$_led_list"
+}
+
+# ---- LED 名 / 恢复值解析：'blue:power|1' / 'blue:indicator-0'（无 | = 交给 led 服务）----
+led_name()    { echo "${1%%|*}"; }
+led_restore() {
+	case "$1" in
+		*"|"*) r="${1#*|}"; [ -n "$r" ] && echo "$r" || echo __svc__ ;;
+		*) echo __svc__ ;;
+	esac
+}
+led_exists()  { [ -e "/sys/class/leds/$1/brightness" ]; }
+# LED 是否由 /etc/config/system 声明（是的话「开灯」直接交给 /etc/init.d/led start 重建）
+led_in_uci()  { uci -q show system 2>/dev/null | grep -q "\.sysfs='$1'$"; }
+
+# ---- 网口灯探测（当前机型为空；将来 DTS/驱动补齐后自动生效）----
+collect_eth_leds() {
+	leds=
+	for l in /sys/class/leds/*; do
+		[ -e "$l/brightness" ] || continue
+		n=$(basename "$l")
+		case " $ALL_LEDS " in *" $n "*) continue ;; esac
+		case "$n" in
+			*:lan*|*:wan*|*:eth*|lan*|wan*) ;;
+			*)
+				# 或：netdev trigger 且绑定到 lan*/wan*/eth* 接口
+				dev=$(cat "$l/device_name" 2>/dev/null)
+				case "$dev" in lan*|wan*|eth*) ;; *) continue ;; esac
+				;;
+		esac
+		leds="$leds $n|__svc__"
+	done
+	echo "$leds"
+}
+
+build_led_list() {
+	ALL_LEDS=""
+	for spec in $LED_SPECS; do
+		n=$(led_name "$spec")
+		led_exists "$n" || continue
+		ALL_LEDS="$ALL_LEDS $spec"
+	done
+	[ "$AUTO_ETH_LEDS" = "1" ] && ALL_LEDS="$ALL_LEDS$(collect_eth_leds)"
+}
+
+# ---- 开 / 关 ----
+# OFF 之前先存下每个 LED 的原 trigger/device_name，ON 时才能精确还原（
+# /etc/init.d/led start 只能还原 /etc/config/system 里声明过的那些）
+LEDSNAP=/var/run/ledschedule.leds
+
+led_off() {
+	: > "$LEDSNAP"
+	for spec in $ALL_LEDS; do
+		n=$(led_name "$spec")
+		t=$(sed -ne 's/^.*\[\(.*\)\].*$/\1/p' "/sys/class/leds/$n/trigger" 2>/dev/null)
+		d=$(cat "/sys/class/leds/$n/device_name" 2>/dev/null)
+		echo "$n|$t|$d" >> "$LEDSNAP"
+		echo none > "/sys/class/leds/$n/trigger" 2>/dev/null
+		echo 0    > "/sys/class/leds/$n/brightness" 2>/dev/null
+	done
+}
+
+led_on() {
+	# ① 让 OpenWrt 的 led 服务按 /etc/config/system 重建全部已声明的 LED
+	#    （netdev 这类复杂 trigger 只有它知道 device_name / mode）
+	[ -x /etc/init.d/led ] && /etc/init.d/led start >/dev/null 2>&1
+	# ② 不在 /etc/config/system 里的 LED：按关灯前的快照还原 trigger/device_name
+	if [ -s "$LEDSNAP" ]; then
+		while IFS='|' read -r n t d; do
+			[ -n "$n" ] || continue
+			led_exists "$n" || continue
+			led_in_uci "$n" && continue
+			if [ -n "$t" ] && [ "$t" != none ]; then
+				echo "$t" > "/sys/class/leds/$n/trigger" 2>/dev/null
+				[ -n "$d" ] && echo "$d" > "/sys/class/leds/$n/device_name" 2>/dev/null
+			fi
+		done < "$LEDSNAP"
+	fi
+	# ③ 配置里写了 |亮度的，最后覆写亮度（power 常亮、indicator-1 熄灭等）
+	for spec in $ALL_LEDS; do
+		n=$(led_name "$spec")
+		r=$(led_restore "$spec")
+		[ "$r" = "__svc__" ] && continue
+		echo "$r" > "/sys/class/leds/$n/brightness" 2>/dev/null
+	done
+}
+
+# 所有目标 LED 都处于「trigger=none 且 brightness=0」才算 off
+leds_state() {
+	for spec in $ALL_LEDS; do
+		n=$(led_name "$spec")
+		[ "$(cat /sys/class/leds/$n/brightness 2>/dev/null)" = "0" ] || { echo on; return; }
+		case "$(cat /sys/class/leds/$n/trigger 2>/dev/null)" in
+			*'[none]'*) ;;
+			*) echo on; return ;;
+		esac
+	done
+	echo off
+}
+
+# ---- 时段计算 ----
+valid_hhmm() { case "$1" in [0-2][0-9]:[0-5][0-9]) [ "${1%%:*}" -le 23 ] ;; *) return 1 ;; esac; }
+hhmm_to_min() { echo $(( ${1%%:*} * 60 + ${1##*:} )); }
+
+in_off_window() {
+	[ -n "$OFF_START" ] || return 1
+	[ -n "$OFF_END" ] || return 1
+	valid_hhmm "$OFF_START" || return 1
+	valid_hhmm "$OFF_END" || return 1
+	[ "$OFF_START" = "$OFF_END" ] && return 1
+
+	s=$(hhmm_to_min "$OFF_START")
+	e=$(hhmm_to_min "$OFF_END")
+	n=$(hhmm_to_min "$(date +%H:%M)")
+
+	if [ "$s" -lt "$e" ]; then
+		[ "$n" -ge "$s" ] && [ "$n" -lt "$e" ] && return 0
+	else
+		# 跨零点，例如 22:30 -> 07:00
+		if [ "$n" -ge "$s" ] || [ "$n" -lt "$e" ]; then return 0; fi
+	fi
+	return 1
+}
+
+# ---- 手动覆盖状态 ----
+state_set() { printf 'mode=%s\nhold_until=%s\n' "$1" "$2" > "$STATE"; }
+state_get() { # $1=key
+	[ -f "$STATE" ] || return 1
+	sed -n "s/^$1=//p" "$STATE" | head -1
+}
+
+manual_active() {
+	[ "$(state_get mode)" = "manual" ] || return 1
+	until=$(state_get hold_until)
+	[ -n "$until" ] || return 1
+	[ "$(date +%s)" -lt "$until" ] || return 1
+	return 0
+}
+
+hold_expiry() {
+	# 手动覆盖的到期时间：min(现在 + MANUAL_HOLD 分钟, 下一个时段边界)
+	now=$(date +%s)
+	until=$(( now + MANUAL_HOLD * 60 ))
+	[ "$MANUAL_HOLD" -le 0 ] && until=$(( now + 86400 ))
+	today=$(date +%s -d "$(date +%Y-%m-%d) 00:00:00" 2>/dev/null)
+	if [ -n "$today" ]; then
+		for b in "$OFF_START" "$OFF_END"; do
+			valid_hhmm "$b" || continue
+			bt=$(( today + (${b%%:*} * 60 + ${b##*:}) * 60 ))
+			if [ "$bt" -gt "$now" ] && [ "$bt" -lt "$until" ]; then until=$bt; fi
+			bt2=$(( bt + 86400 ))
+			if [ "$bt2" -gt "$now" ] && [ "$bt2" -lt "$until" ]; then until=$bt2; fi
+		done
+	fi
+	echo "$until"
+}
+
+# ---- 输出 ----
+log() {
+	logger -t ledctl "$*" 2>/dev/null
+	[ -t 1 ] && echo "$(date '+%F %T') $*"
+	return 0
+}
+
+fmt_led() {
+	spec=$1
+	n=$(led_name "$spec")
+	t=$(sed -ne 's/^.*\[\(.*\)\].*$/\1/p' "/sys/class/leds/$n/trigger" 2>/dev/null)
+	b=$(cat "/sys/class/leds/$n/brightness" 2>/dev/null)
+	led_in_uci "$n" && src=uci || src=ledctl
+	printf '  %-18s trigger=%-12s brightness=%-4s 恢复来源=%s\n' "$n" "${t:-?}" "${b:-?}" "$src"
+}
+
+cmd_status() {
+	build_led_list
+	printf '熄灯时段   : %s -> %s  (%s)\n' "$OFF_START" "$OFF_END" \
+		"$(in_off_window && echo '现在是关灯时段' || echo '现在是开灯时段')"
+	printf '服务开关   : %s   轮询 %ss   手动覆盖上限 %s 分钟\n' \
+		"$([ "$ENABLED" = 1 ] && echo enabled || echo disabled)" "$INTERVAL" "$MANUAL_HOLD"
+	m=$(state_get mode); [ -z "$m" ] && m=auto
+	if [ "$m" = manual ] && manual_active; then
+		printf '当前模式   : manual（手动覆盖中，%s 到期）\n' "$(date -d "@$(state_get hold_until)" '+%F %T' 2>/dev/null || echo "epoch $(state_get hold_until)")"
+	else
+		printf '当前模式   : auto（按时段自动执行）\n'
+	fi
+	printf 'LED 状态   : %s\n' "$(leds_state)"
+	printf '受控 LED（%s 个）:\n' "$(echo $ALL_LEDS | wc -w)"
+	for spec in $ALL_LEDS; do fmt_led "$spec"; done
+}
+
+cmd_blink() {
+	target=${1:-}
+	secs=${2:-15}
+	case "$secs" in ''|*[!0-9]*) echo "用法: ledctl blink [led名] [秒数]" >&2; return 1 ;; esac
+
+	build_led_list   # 必须先建起来：was/恢复都看 ALL_LEDS，否则会误判为 off
+	if [ -n "$target" ]; then
+		led_exists "$target" || { echo "没有这个 LED: $target" >&2; return 1; }
+		specs="$target|"
+	else
+		specs=$ALL_LEDS
+	fi
+	[ -n "$(echo $specs)" ] || { echo "没有可闪烁的 LED" >&2; return 1; }
+
+	was=$(leds_state)
+	for spec in $specs; do
+		n=$(led_name "$spec")
+		echo timer > "/sys/class/leds/$n/trigger" 2>/dev/null
+		echo 500   > "/sys/class/leds/$n/delay_on" 2>/dev/null
+		echo 500   > "/sys/class/leds/$n/delay_off" 2>/dev/null
+	done
+	echo "闪烁 $secs 秒（0.5s 亮 / 0.5s 灭）：$(echo $specs | tr " " ",")"
+	sleep "$secs"
+	[ "$was" = off ] && led_off || led_on
+	echo "已恢复为 $was"
+}
+
+cmd_schedule() {
+	printf '熄灯时段: %s -> %s\n' "$OFF_START" "$OFF_END"
+	printf '当前时间: %s\n' "$(date '+%F %T %Z')"
+	in_off_window && echo '当前应为: 关灯' || echo '当前应为: 开灯'
+}
+
+cmd_apply() {
+	build_led_list
+	if [ "$(echo $ALL_LEDS | wc -w)" = 0 ]; then
+		echo "错误：没有找到任何可控制的 LED" >&2
+		return 1
+	fi
+	want=$1
+	cur=$(leds_state)
+	if [ "$want" = off ] && [ "$cur" != off ]; then
+		led_off
+		log "关灯（$([ "$2" = manual ] && echo 手动 || echo 定时)）"
+	elif [ "$want" = on ] && [ "$cur" = off ]; then
+		led_on
+		log "开灯（$([ "$2" = manual ] && echo 手动 || echo 定时)）"
+	else
+		[ "$2" = manual ] && log "已经是 $want 状态，无需改动"
+	fi
+}
+
+cmd_daemon() {
+	build_led_list
+	if [ "$(echo $ALL_LEDS | wc -w)" = 0 ]; then
+		log "错误：没有找到任何可控制的 LED，退出"
+		return 1
+	fi
+	log "指示灯定时启动：$OFF_START-$OFF_END 关灯，轮询 ${INTERVAL}s，受控 $(echo $ALL_LEDS | wc -w) 个 LED"
+
+	last_mode= last_want=
+	while :; do
+		# 每个 tick 重读一次配置：改完 uci 不用重启服务就生效
+		load_config
+		build_led_list
+		if [ "$ENABLED" = "0" ]; then
+			[ "$last_want" != disabled ] && log "服务已禁用（uci: ledschedule.main.enabled=0），不干预 LED"
+			last_want=disabled
+			sleep "$INTERVAL"
+			continue
+		fi
+
+		if manual_active; then
+			[ "$last_mode" != manual ] && log "手动覆盖生效中，暂停自动切换"
+			last_mode=manual
+		else
+			if [ "$last_mode" = manual ]; then
+				log "手动覆盖结束，恢复自动切换"
+				state_set auto 0
+			fi
+			last_mode=auto
+			if in_off_window; then want=off; else want=on; fi
+			if [ "$want" != "$last_want" ]; then
+				cmd_apply "$want" auto
+				last_want=$want
+			fi
+		fi
+		sleep "$INTERVAL"
+	done
+}
+
+load_config
+case "${1:-status}" in
+	status)   cmd_status ;;
+	schedule) cmd_schedule ;;
+	blink)    cmd_blink "${2:-}" "${3:-15}" ;;
+	daemon)   cmd_daemon ;;
+	off)      cmd_apply off manual; state_set manual "$(hold_expiry)" ;;
+	on)       cmd_apply on  manual; state_set manual "$(hold_expiry)" ;;
+	auto)     state_set auto 0; log "取消手动覆盖，回到自动"; cmd_apply "$(in_off_window && echo off || echo on)" auto ;;
+	toggle)   if [ "$(build_led_list; leds_state)" = off ]; then
+			cmd_apply on manual; state_set manual "$(hold_expiry)"
+		else
+			cmd_apply off manual; state_set manual "$(hold_expiry)"
+		fi ;;
+	*)
+		cat >&2 <<-'EOF'
+		用法:
+		  ledctl [status]   时段 / 模式 / 每个 LED 的当前状态
+		  ledctl schedule   熄灯时段与当前应处状态
+		  ledctl off        立刻关灯（手动覆盖）
+		  ledctl on         立刻开灯（手动覆盖）
+		  ledctl toggle     开/关切换
+		  ledctl auto       取消手动覆盖，立即按时段执行
+		  ledctl blink [led名] [秒数]
+		                   让某个（默认全部）LED 快速闪烁，用来识别面板灯
+		  ledctl daemon     前台常驻（procd 拉起）
+		EOF
+		exit 1
+		;;
+esac
