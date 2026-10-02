@@ -14,6 +14,10 @@
 #
 START=98
 
+# 这是一次性脚本（没有 procd 实例），register 一下 status，否则 rc.common
+# 的默认命令表里没有 status，会打印 "Syntax: ... [command]"
+extra_command "status" "显示已发布的模块信息状态"
+
 AT_PORT=/dev/ttyUSB1
 AT_BIN=/usr/bin/mt5700-at
 CONF=/tmp/modconf.conf
