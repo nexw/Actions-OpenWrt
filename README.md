@@ -63,10 +63,20 @@ DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但**现网镜像
 `pwm-fan.ko` 也不是 builtin），且 `cpu-thermal` 的 `cooling-maps` 只绑了 WiFi/未绑风扇，
 内核 governor 不会驱动风扇。为不阻塞使用，仓库用 userspace 闭环补上这一段：
 
-- `usr/bin/fanctl`：读 `thermal_zone0` → 查曲线（线性插值）→ 写 `pwm0/duty_cycle`。
+- `usr/bin/fanctl`：读 `thermal_zone0` → 查曲线（线性插值）→ 写 PWM。
   带 **3 ℃ 迟滞**、单次最多降 **10%**（抑制转速突变啸叫）、**>95 ℃ 直接拉满**、
-  **温度读失败时保守拉满**、开机自动补齐 `period/enable` 与 `fan-hw` 供电；
-  若检测到内核 `pwmfan` 驱动上线（含运行期上线）会**自动让位**，不与内核 governor 抢 `pwm0`。
+  **温度读失败时保守拉满**、开机自动补齐 `period/enable` 与 `fan-hw` 供电。
+  两条通路（每个 tick 重解析，内核驱动中途上下线也能跟上）：
+  | 情况 | 通路 | 写入 |
+  |---|---|---|
+  | 内核无 `pwmfan` 驱动 | `userspace-sysfs` | `/sys/class/pwm/pwmchip0/pwm0/duty_cycle`（ns） |
+  | 内核已接管 `pwm0` | `hwmon`（默认） | `/sys/class/hwmon/*/pwm1`（0–255），**温控照旧生效** |
+  | 内核已接管且 `kernel_driver='yield'` | `yield` | 不插手，交回内核 governor |
+
+  > ⚠️ 带 `kmod-hwmon-pwmfan` 的镜像里内核会独占 `pwm0`，而 DTS 的 `cpu-thermal`
+  > `cooling-maps` 只绑了 WiFi、没绑风扇 —— 所以**必须走 `hwmon` 通路**，否则风扇会
+  > 死锁在内核初始化的 50%。只有将来给风扇绑了 cooling-map，才应该把
+  > `kernel_driver` 改成 `yield`。
 - `etc/init.d/fancontrol`：procd 托管（退出后 5 s 重启，1 h 内最多 5 次），`START=96`
   （在 95 的 `fanfallback` 之后接管）。
 - `etc/config/fancontrol`：间隔、曲线、下限/上限、迟滞、降幅、硬阈值均可调。
@@ -91,8 +101,8 @@ uci set fancontrol.main.interval='5' && uci commit fancontrol
 LuCI 里也预置了三个「风扇」快捷命令（`luci-app-commands` → 系统 → 命令）。
 
 > **后续修法（需重新构建并实机验证）**：给 `cpu-thermal` 的 `cooling-maps` 增加风扇
-> `cooling-device = <&fan ...>`，并确认 `kmod-hwmon-pwmfan` 真的进了镜像，即可交回内核
-> governor 管理；`fancontrol` 检测到 hwmon 后会自动让位。
+> `cooling-device = <&fan ...>`，并把 `kernel_driver` 改成 `yield` 即可交回内核 governor；
+> 但现成 trip 点只有 60/85/115 ℃，粒度较粗，暂不采用。
 > 注：`patches/0001` 把 `fan-fg` 写成 `gpio-export,output=<1>`，实测为输出、读不到转速，
 > 想要 tach 反馈需改成 input；本脚本因此不使用转速反馈。
 

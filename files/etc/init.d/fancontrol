@@ -10,14 +10,17 @@ STOP=10
 USE_PROCD=1
 
 start_service() {
-	# 内核 pwmfan 驱动已接管则不再插手（fanctl 自己也会判断，这里提前退出更干净）
-	for h in /sys/class/hwmon/hwmon*; do
-		[ -r "$h/name" ] || continue
-		if [ "$(cat "$h/name" 2>/dev/null)" = "pwmfan" ]; then
-			logger -t fancontrol "内核 pwmfan 驱动已接管，跳过 userspace 温控"
-			return 0
-		fi
-	done
+	# 内核 pwmfan 驱动就算已接管 pwm0 也要启动：fanctl 会改走 hwmon/pwm1 继续控温。
+	# 只有显式配 kernel_driver=yield 时才真的让位。
+	if [ "$(uci -q get fancontrol.main.kernel_driver)" = "yield" ]; then
+		for h in /sys/class/hwmon/hwmon*; do
+			[ -r "$h/name" ] || continue
+			if [ "$(cat "$h/name" 2>/dev/null)" = "pwmfan" ]; then
+				logger -t fancontrol "kernel_driver=yield 且内核 pwmfan 已接管，跳过 userspace 温控"
+				return 0
+			fi
+		done
+	fi
 
 	procd_open_instance
 	procd_set_param command /usr/bin/fanctl daemon

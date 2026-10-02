@@ -6,8 +6,9 @@
 #       kmod-hwmon-pwmfan，且 cpu-thermal 的 cooling-maps 只绑了 WiFi，没绑风扇，
 #       所以内核温控不会驱动风扇。本脚本用 userspace 闭环补上这一段。
 #
-# 若将来镜像带上了 pwmfan 驱动（/sys/class/hwmon/*/name == pwmfan），
-# 脚本会自动让位，只在 status 里显示内核侧状态，不与内核 governor 抢 pwm0。
+# 若镜像带上了 pwmfan 驱动（/sys/class/hwmon/*/name == pwmfan），它会独占 pwm0。
+# 此时默认改走 hwmon 的 pwm1（0-255）继续控温（option kernel_driver='hwmon'）；
+# 若 DTS 给风扇绑了 cooling-map、想交回内核 governor，把该项设为 'yield' 即可。
 #
 # 用法：
 #   fanctl daemon        前台常驻温控循环（由 /etc/init.d/fancontrol 经 procd 拉起）
@@ -32,6 +33,11 @@ HYSTERESIS=3000          # 迟滞 3.0 ℃，避免在阈值附近来回抖
 DOWN_STEP=10             # 每次最多降 10%，抑制转速突变啸叫
 FORCE_MAX_TEMP=95000     # 超过则立即 100%
 FAN_POWER_GPIO=/sys/class/gpio/fan-hw/value
+# 内核 pwmfan 驱动占了 pwm0 时：hwmon=改走 hwmon/pwm1 继续控温；yield=让位给内核
+KERNEL_DRIVER=hwmon
+# 运行期解析结果
+PWM_MODE=                # sysfs | hwmon | yield | none
+PWM_NODE=                # 实际写入的节点
 # temp_md:duty%  升序；中间线性插值。
 # 实机参考：原先只有开机 50% 兜底时空载 ~77 ℃；按本曲线空载稳定在 ~71-72 ℃（≈68%），
 # 所以中段压低、把满速（100%）留给 85 ℃ 以上。
@@ -53,6 +59,7 @@ load_config() {
 	config_get DOWN_STEP      main down_step       "$DOWN_STEP"
 	config_get FORCE_MAX_TEMP main force_max_temp  "$FORCE_MAX_TEMP"
 	config_get FAN_POWER_GPIO main fan_power_gpio  "$FAN_POWER_GPIO"
+	config_get KERNEL_DRIVER  main kernel_driver   "$KERNEL_DRIVER"
 	config_get CURVE          main curve           "$CURVE"
 }
 
@@ -63,6 +70,21 @@ kernel_fan_hwmon() {
 		[ "$(cat "$h/name" 2>/dev/null)" = "pwmfan" ] && { echo "$h"; return 0; }
 	done
 	return 1
+}
+
+# 解析温控走哪条通路（每个 tick 重解析：内核驱动可能中途上下线）
+resolve_pwm() {
+	PWM_MODE=sysfs
+	PWM_NODE=$PWM_DIR/duty_cycle
+	hz=$(kernel_fan_hwmon) || return 0
+	if [ "$KERNEL_DRIVER" = "yield" ]; then
+		PWM_MODE=yield; PWM_NODE=$hz
+	elif [ -w "$hz/pwm1" ]; then
+		PWM_MODE=hwmon; PWM_NODE=$hz/pwm1
+	else
+		PWM_MODE=none;  PWM_NODE=$hz
+	fi
+	return 0
 }
 
 read_temp() {
@@ -80,6 +102,8 @@ ensure_fan_power() {
 }
 
 ensure_pwm() {
+	# 内核驱动接管时（hwmon/yield）不需要我们配置 pwm0
+	[ "$PWM_MODE" = "sysfs" ] || return 0
 	[ -d "$PWM_DIR" ] || { echo 0 > "$PWM_CHIP/export" 2>/dev/null; sleep 1; }
 	[ -d "$PWM_DIR" ] || return 1
 
@@ -92,14 +116,35 @@ ensure_pwm() {
 	return 0
 }
 
-# 百分比 -> ns 并写入；写失败返回非 0（调用方保留旧档位，不会盲目更新状态）
+# 百分比 -> 实际值并写入；写失败返回非 0（调用方保留旧档位，不会盲目更新状态）
+#   sysfs 通路：写 pwm0/duty_cycle（ns）
+#   hwmon 通路：写 hwmon/pwm1（0-255，内核 pwmfan 已接管 pwm0 时）
 set_duty_pct() {
 	pct=$1
 	[ "$pct" -lt 0 ] && pct=0
 	[ "$pct" -gt 100 ] && pct=100
-	ns=$(( PERIOD_NS * pct / 100 ))
-	echo "$ns" > "$PWM_DIR/duty_cycle" 2>/dev/null || return 1
+	case "$PWM_MODE" in
+		hwmon) echo $(( 255 * pct / 100 )) > "$PWM_NODE" 2>/dev/null || return 1 ;;
+		sysfs) echo $(( PERIOD_NS * pct / 100 )) > "$PWM_NODE" 2>/dev/null || return 1 ;;
+		*)     return 1 ;;
+	esac
 	return 0
+}
+
+# 当前占空比（百分比），用于迟滞判断
+read_duty_pct() {
+	case "$PWM_MODE" in
+		hwmon)
+			v=$(cat "$PWM_NODE" 2>/dev/null)
+			echo $(( ${v:-0} * 100 / 255 ))
+			;;
+		sysfs)
+			v=$(cat "$PWM_NODE" 2>/dev/null)
+			p=$(cat "$PWM_DIR/period" 2>/dev/null)
+			if [ -n "$p" ] && [ "${p:-0}" -gt 0 ]; then echo $(( ${v:-0} * 100 / p )); else echo 0; fi
+			;;
+		*) echo 0 ;;
+	esac
 }
 
 # 温度 -> 目标占空比（曲线线性插值）
@@ -140,6 +185,7 @@ log() {
 }
 
 cmd_status() {
+	resolve_pwm
 	hz=$(kernel_fan_hwmon) || hz=
 	t=$(read_temp) || t=
 	pwm_ns=$(cat "$PWM_DIR/duty_cycle" 2>/dev/null)
@@ -147,19 +193,21 @@ cmd_status() {
 	en=$(cat "$PWM_DIR/enable" 2>/dev/null)
 	pwr=$(cat "$FAN_POWER_GPIO" 2>/dev/null)
 
-	if [ -n "$hz" ]; then
-		mode="kernel-pwmfan ($hz)"
-	else
-		mode=userspace-fanctl
-	fi
-
-	printf 'mode       : %s\n' "$mode"
+	case "$PWM_MODE" in
+		hwmon) printf 'mode       : hwmon-pwmfan %s（内核驱动占着 pwm0，fanctl 走 hwmon/pwm1 控温）\n' "$PWM_NODE" ;;
+		yield) printf 'mode       : kernel-pwmfan %s（配置为让位，交回内核 governor）\n' "$PWM_NODE" ;;
+		sysfs) printf 'mode       : userspace-sysfs %s\n' "$PWM_NODE" ;;
+		*)     printf 'mode       : none（pwm0 与 pwmfan/pwm1 都不可用）\n' ;;
+	esac
 	if [ -n "$t" ]; then
 		printf 'cpu temp   : %s.%s C\n' "$((t / 1000))" "$((t % 1000 / 100))"
 	else
 		printf 'cpu temp   : (读取失败 %s)\n' "$TEMP_ZONE"
 	fi
-	if [ -n "$period" ] && [ -n "$pwm_ns" ] && [ "$period" -gt 0 ]; then
+	if [ "$PWM_MODE" = "hwmon" ]; then
+		v=$(cat "$PWM_NODE" 2>/dev/null)
+		printf 'pwm duty   : %s / 255 = %s%%\n' "${v:-?}" "$(( ${v:-0} * 100 / 255 ))"
+	elif [ -n "$period" ] && [ -n "$pwm_ns" ] && [ "$period" -gt 0 ]; then
 		printf 'pwm duty   : %s ns / %s ns = %s%%  (enabled=%s)\n' \
 			"$pwm_ns" "$period" "$((pwm_ns * 100 / period))" "${en:-?}"
 	else
@@ -183,26 +231,28 @@ cmd_curve() {
 }
 
 cmd_daemon() {
-	if hz=$(kernel_fan_hwmon); then
-		log "检测到内核 pwmfan 驱动（$hz），内核温控已接管，fanctl 退出"
-		return 0
-	fi
+	resolve_pwm
+	case "$PWM_MODE" in
+		yield) log "内核 pwmfan 驱动（$PWM_NODE）已接管且 kernel_driver=yield，fanctl 退出"; return 0 ;;
+		none)  log "错误：pwm0 与 pwmfan/pwm1 都不可用，风扇温控未启动"; return 1 ;;
+		hwmon) log "内核 pwmfan 已独占 pwm0，改走 $PWM_NODE（0-255）继续控温" ;;
+	esac
 	if ! ensure_pwm; then
 		log "错误：$PWM_DIR 不可用，风扇温控未启动"
 		return 1
 	fi
 	ensure_fan_power
 
-	cur=$(cat "$PWM_DIR/duty_cycle" 2>/dev/null)
-	cur=$(( ${cur:-0} * 100 / PERIOD_NS ))
-	log "温控启动 interval=${INTERVAL}s min=${MIN_DUTY}% max=${MAX_DUTY}% 起始=${cur}%"
+	cur=$(read_duty_pct)
+	log "温控启动 mode=$PWM_MODE interval=${INTERVAL}s min=${MIN_DUTY}% max=${MAX_DUTY}% 起始=${cur}%"
 
 	while :; do
-		# 运行期内核 pwmfan 驱动上线（例如手动 modprobe）则让位，避免抢 pwm0
-		if hz=$(kernel_fan_hwmon); then
-			log "检测到内核 pwmfan 驱动（$hz）上线，fanctl 退出并让位"
-			return 0
-		fi
+		# 每个 tick 重解析：内核 pwmfan 驱动可能中途上线/下线
+		resolve_pwm
+		case "$PWM_MODE" in
+			yield) log "检测到内核 pwmfan 并配置为让位，fanctl 退出"; return 0 ;;
+			none)  log "PWM 通路失效（既无 pwm0 也无 pwmfan/pwm1），fanctl 退出"; return 1 ;;
+		esac
 		ensure_fan_power
 		if ! t=$(read_temp); then
 			# 温度读不到：宁可信其热，拉满并告警，不要静默失控
@@ -236,7 +286,7 @@ cmd_daemon() {
 				fi
 				cur=$want
 			else
-				log "写入 pwm0/duty_cycle 失败（want=${want}%），保持 ${cur}%"
+				log "写入 $PWM_NODE 失败（want=${want}%），保持 ${cur}%"
 			fi
 		fi
 		echo "temp=${t:-na}md duty=${cur}%" > "$STATE" 2>/dev/null
@@ -257,6 +307,11 @@ case "${1:-status}" in
 		pct=${2:-}
 		case "$pct" in
 			''|*[!0-9]*) echo "用法: fanctl set <1-100>" >&2; exit 1 ;;
+		esac
+		resolve_pwm
+		case "$PWM_MODE" in
+			none)  echo "PWM 通路不可用（pwm0 与 pwmfan/pwm1 都没有）" >&2; exit 1 ;;
+			yield) echo "kernel_driver=yield，内核 driver 接管中，未手动设置" >&2; exit 1 ;;
 		esac
 		ensure_pwm || { echo "pwm0 不可用" >&2; exit 1; }
 		ensure_fan_power

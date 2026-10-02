@@ -8,7 +8,7 @@ config fancontrol 'main'
 	option pwm_dir '/sys/class/pwm/pwmchip0/pwm0'
 	# 25 kHz，不改就与 DTS 里 pwm-fan 的 period 一致
 	option period_ns '40000'
-	# 转速下限（防止风扇堵转/停转）与上限
+	# 占空比上限对应的温度、以及占空比下限
 	option min_duty '25'
 	option max_duty '100'
 	# 降速迟滞（毫摄氏度）与单次最大降幅（百分点）
@@ -18,5 +18,9 @@ config fancontrol 'main'
 	option force_max_temp '95000'
 	# 风扇供电 GPIO（gpio-export 名为 fan-hw）
 	option fan_power_gpio '/sys/class/gpio/fan-hw/value'
+	# 内核 pwmfan 驱动独占 pwm0 时怎么办：
+	#   'hwmon' = 改走 /sys/class/hwmon/*/pwm1（0-255）继续控温（默认，保住温控）
+	#   'yield' = 让位给内核（仅当 DTS 给风扇绑了 cooling-map 时才选）
+	option kernel_driver 'hwmon'
 	# 温度-转速曲线，"毫摄氏度:百分比" 升序，中间线性插值
 	option curve '45000:25 55000:30 60000:38 65000:48 70000:60 75000:72 80000:88 85000:100'
