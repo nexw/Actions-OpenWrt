@@ -14,6 +14,7 @@
 #   fanctl daemon        前台常驻温控循环（由 /etc/init.d/fancontrol 经 procd 拉起）
 #   fanctl status        打印温度 / 占空比 / 风扇供电 / 控制模式
 #   fanctl set <pct>     手动设置占空比（1-100，下次温控循环会被纠正）
+#   fanctl auto          交回自动温控（立即按曲线设一次）
 #   fanctl temp          只打印 CPU 温度（摄氏度）
 #   fanctl curve         打印当前生效的温度-转速曲线
 #
@@ -338,6 +339,22 @@ case "${1:-status}" in
 		log "手动设置 duty=${pct}%"
 		cmd_status
 		;;
+	auto)
+		# 手动调速后交回曲线：立即按当前温度设一次，后续由守护进程接管
+		resolve_pwm
+		case "$PWM_MODE" in
+			none)  echo "PWM 通路不可用（pwm0 与 pwmfan/pwm1 都没有）" >&2; exit 1 ;;
+			yield) echo "kernel_driver=yield，内核 driver 接管中，无需操作" >&2; exit 1 ;;
+		esac
+		t=$(read_temp) || { echo "读取温度失败：$TEMP_ZONE" >&2; exit 1; }
+		want=$(clamp_duty "$(duty_for_temp "$t")")
+		if set_duty_pct "$want"; then
+			log "交回自动温控：按曲线立即设到 ${want}%（temp=$t）"
+		else
+			echo "写入 $PWM_NODE 失败" >&2; exit 1
+		fi
+		cmd_status
+		;;
 	*)
 		cat >&2 <<-'EOF'
 		用法:
@@ -345,6 +362,7 @@ case "${1:-status}" in
 		  fanctl curve        打印当前生效的温度-转速曲线
 		  fanctl temp         只打印 CPU 温度（摄氏度）
 		  fanctl set <1-100>  手动设置占空比（下次温控循环会被曲线纠正）
+		  fanctl auto         交回自动温控（立即按曲线设一次）
 		  fanctl daemon       前台常驻温控循环（由 procd 拉起）
 		EOF
 		exit 1

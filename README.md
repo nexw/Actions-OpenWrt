@@ -94,6 +94,7 @@ DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但**现网镜像
 fanctl status     # 模式 / CPU 温度 / 当前占空比 / 风扇供电 / 目标档位
 fanctl curve      # 查看生效曲线
 fanctl set 80     # 手动打到 80%（下一个温控循环会按曲线纠正）
+fanctl auto       # 立刻交回自动温控（按当前温度设一次，之后由守护进程接管）
 uci set fancontrol.main.interval='5' && uci commit fancontrol
 /etc/init.d/fancontrol restart
 ```
