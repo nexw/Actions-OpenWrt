@@ -23,4 +23,23 @@ done
 # sed -i 's/192.168.1.1/192.168.66.1/g' "$OPENWRT/package/base-files/files/bin/config_generate"
 # sed -i 's/OpenWrt/C8/g' "$OPENWRT/package/base-files/files/bin/config_generate"
 
+# ---- 3. 本地包与包元数据缓存 ----
+# diy-part1 在 feeds 之前把 packages/ 拷进了 openwrt/package/。这里：
+#   a) 确认包真的就位（早点报错，别等 2.5 小时）
+#   b) 清掉 tmp/ 下的包元数据缓存 —— 否则 make defconfig 可能还在用旧索引，
+#      把本地包的 CONFIG_PACKAGE_* 当成未知符号静默删掉（实测踩过：
+#      luci-app-wtmodem / luci-app-cellscan 被 defconfig 丢掉，但没任何报错）
+for p in "$GITHUB_WORKSPACE"/packages/*/; do
+    [ -d "$p" ] || continue
+    name=$(basename "$p")
+    if [ ! -f "$OPENWRT/package/$name/Makefile" ]; then
+        echo "错误：openwrt/package/$name/Makefile 不存在（diy-part1 没拷进来？）" >&2
+        exit 1
+    fi
+    echo "local package ok: $name"
+done
+rm -f "$OPENWRT/tmp/.packageinfo" "$OPENWRT/tmp/.config-package.in" \
+      "$OPENWRT/tmp/.targetinfo" "$OPENWRT/tmp/.config-target.in"
+echo "已清理 tmp/ 包元数据缓存（下次 make defconfig 会重新扫描）"
+
 echo "diy-part2 done"

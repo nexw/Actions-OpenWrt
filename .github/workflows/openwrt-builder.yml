@@ -93,6 +93,24 @@ jobs:
       run: |
         cd openwrt
         make defconfig
+        # ---- 诊断：本地包为什么没进 .config ----
+        echo "==== 诊断 ===="
+        echo "--- openwrt/package/ 下由本仓库提供的包 ---"
+        ls -d package/luci-app-* 2>/dev/null | head -10
+        echo "--- package/luci-app-wtmodem 内容 ---"
+        ls -la package/luci-app-wtmodem 2>&1 | head -10
+        echo "--- 生成的 Kconfig 里是否注册了符号 ---"
+        for p in luci-app-wtmodem luci-app-cellscan; do
+          printf '  %s: ' "$p"
+          if [ -f tmp/.config-package.in ]; then
+            grep -c "config PACKAGE_$p$" tmp/.config-package.in 2>/dev/null || echo 0
+          else
+            echo 'tmp/.config-package.in 不存在'
+          fi
+        done
+        echo "--- .config 里是否有残留 ---"
+        grep -nE 'luci-app-(wtmodem|cellscan)' .config | head -5 || echo '  (无)'
+        echo "==== 诊断结束 ===="
         # 快速失败：确认本仓库自带的本地包真的被 defconfig 选中了。
         # 否则要等 2.5 小时才在编译末尾报“找不到包/依赖缺失”，代价太大。
         missing=0
