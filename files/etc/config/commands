@@ -82,3 +82,45 @@ config command
 	option command '/usr/bin/ledctl auto'
 	option param '0'
 	option public '0'
+
+config command
+	option name '短信：收件箱'
+	option command '/usr/bin/mt5700-sms list'
+	option param '0'
+	option public '0'
+
+config command
+	option name '短信：未读数量'
+	option command '/usr/bin/mt5700-sms count'
+	option param '0'
+	option public '0'
+
+config command
+	option name '短信：查看某条（参数填序号）'
+	option command '/usr/bin/mt5700-sms read'
+	option param '1'
+	option public '0'
+
+config command
+	option name '短信：发送（两个参数：号码 正文）'
+	option command '/usr/bin/mt5700-sms send'
+	option param '2'
+	option public '0'
+
+config command
+	option name '短信：删除某条（参数填序号）'
+	option command '/usr/bin/mt5700-sms delete'
+	option param '1'
+	option public '0'
+
+config command
+	option name '短信：手动清理（删除全部已读）'
+	option command '/usr/bin/mt5700-sms delete read'
+	option param '0'
+	option public '0'
+
+config command
+	option name '短信：测试通知/转发（用假短信走一遍）'
+	option command '/usr/bin/mt5700-sms test-notify'
+	option param '0'
+	option public '0'

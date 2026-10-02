@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""mt5700-sms — MT5700M 短信管理（查看 / 发送 / 删除 / 未读 / 新短信通知与转发）
+
+设计说明见 docs/refs/modem-sms-design.md。要点：
+  * 只用 python3-light 自带的模块 + 仓库自带 /usr/lib/mt5700/serialport.py，
+    不依赖 pyserial / requests
+  * 统一走「文本模式 + UCS2」：AT+CMGF=1 + AT+CSCS="UCS2"，
+    号码与正文都按 UTF-16BE 十六进制收发 —— 中文/英文一套逻辑
+  * 手动清理：delete <index> | read | sent | all（不做自动清理）
+  * watch：轮询未读集合，出现新 index 就通知/转发（不依赖 +CMTI 抢 URC，
+    因为 AT 口还要和面板 zinfo_mt5700.sh / mt5700-* 共享）
+
+用法：
+  mt5700-sms list [all|unread|read|sent] [--json]
+  mt5700-sms read <index> [--json]
+  mt5700-sms send <号码> <正文>
+  mt5700-sms delete <index|read|sent|all>
+  mt5700-sms count                     # 未读数（给通知/LED 用）
+  mt5700-sms watch [--notify-existing] # 常驻：新短信通知+转发
+"""
+import argparse
+import csv
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/lib/mt5700")
+from serialport import SerialPort  # noqa: E402
+
+AT_PORT = os.environ.get("MT5700_AT_PORT", "/dev/ttyUSB1")
+BAUD = int(os.environ.get("MT5700_AT_BAUD", "115200"))
+LOCK_PATH = "/var/run/mt5700-at.lock"
+CONFIG = "mt5700sms"
+
+STAT_MAP = {
+    "REC UNREAD": "unread", "REC READ": "read",
+    "STO UNSENT": "unsent", "STO SENT": "sent", "ALL": "all",
+}
+LIST_ARG = {"all": "ALL", "unread": "REC UNREAD",
+            "read": "REC READ", "sent": "STO SENT", "unsent": "STO UNSENT"}
+
+
+# ---------------------------------------------------------------- UCI
+def uci_get(key, default=""):
+    try:
+        out = subprocess.run(["uci", "-q", "get", key], capture_output=True,
+                             text=True, timeout=5)
+        v = (out.stdout or "").strip()
+        return v if v else default
+    except Exception:
+        return default
+
+
+def load_config():
+    return {
+        "enabled": uci_get(f"{CONFIG}.main.enabled", "1") == "1",
+        "interval": max(3, int(uci_get(f"{CONFIG}.main.interval", "10") or 10)),
+        "notify_led": uci_get(f"{CONFIG}.main.notify_led", "1") == "1",
+        "led": uci_get(f"{CONFIG}.main.led", "blue:indicator-1"),
+        "forward_enabled": uci_get(f"{CONFIG}.main.forward_enabled", "0") == "1",
+        "forward_url": uci_get(f"{CONFIG}.main.forward_url", ""),
+        "forward_format": uci_get(f"{CONFIG}.main.forward_format", "json"),
+        "forward_timeout": max(3, int(uci_get(f"{CONFIG}.main.forward_timeout", "8") or 8)),
+        "hook": uci_get(f"{CONFIG}.main.hook", ""),
+        "at_port": uci_get(f"{CONFIG}.main.at_port", AT_PORT),
+    }
+
+
+# ---------------------------------------------------------------- 编码
+def ucs2_decode(hexstr):
+    """UCS2(UTF-16BE) 十六进制 → 文本；不是合法 hex 就原样返回（英文短信用 IRA 时）"""
+    h = (hexstr or "").strip()
+    if not h:
+        return ""
+    if re.fullmatch(r"[0-9A-Fa-f]+", h) and len(h) % 4 == 0:
+        try:
+            return bytes.fromhex(h).decode("utf-16-be")
+        except Exception:
+            pass
+    return hexstr
+
+
+def ucs2_encode(text):
+    return text.encode("utf-16-be").hex().upper()
+
+
+# ---------------------------------------------------------------- AT 客户端
+class Modem:
+    """短信域的极简 AT 客户端（复用 serialport.SerialPort）"""
+
+    def __init__(self, port=AT_PORT, baud=BAUD, timeout=4.0):
+        self.port_path = port
+        self.timeout = timeout
+        self.io = SerialPort(port, baud)
+
+    def _read_until(self, want, extra_timeout=None):
+        """读到匹配 want(regex/bytes 列表) 为止，返回 (buf, matched)"""
+        deadline = time.time() + (extra_timeout or self.timeout)
+        buf = b""
+        while time.time() < deadline:
+            chunk = self.io.read()
+            if chunk:
+                buf += chunk
+                for w in want:
+                    if w in buf:
+                        return buf, True
+            else:
+                time.sleep(0.05)
+        return buf, False
+
+    def cmd(self, c, wait=None):
+        """发一条命令，返回去掉回显/URC/OK 之后的有效行列表"""
+        self.io.reset_input_buffer()
+        self.io.write((c + "\r").encode())
+        buf, _ = self._read_until([b"OK\r", b"OK\n", b"ERROR\r", b"ERROR\n"],
+                                  wait)
+        text = buf.decode("utf-8", "replace")
+        out, err = [], False
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("AT") or s in ("OK",):
+                continue
+            if s.startswith("ERROR") or "ERROR" in s:
+                err = True
+                continue
+            out.append(s)
+        return out, err
+
+    # ---- 文本模式 + UCS2
+    def init_sms(self):
+        self.cmd("AT+CMGF=1")
+        self.cmd('AT+CSCS="UCS2"')
+
+    def close(self):
+        self.io.close()
+
+    # ---- 列表 / 读取
+    @staticmethod
+    def _parse_header(line, prefix):
+        """+CMGL/+CMGR 头行 → (index, stat, number, ts)"""
+        body = line[len(prefix):].lstrip(":").lstrip()
+        try:
+            fields = next(csv.reader([body], skipinitialspace=True))
+        except Exception:
+            return None
+        idx = None
+        if prefix == "+CMGL":
+            idx = int(fields[0]) if fields and fields[0].isdigit() else None
+            fields = fields[1:]
+        stat = fields[0] if fields else ""
+        number = fields[1] if len(fields) > 1 else ""
+        ts = fields[3] if len(fields) > 3 else ""
+        return idx, stat, ucs2_decode(number), ts
+
+    def list(self, stat="ALL"):
+        lines, _ = self.cmd(f'AT+CMGL="{stat}"', wait=6.0)
+        msgs, cur = [], None
+        for line in lines:
+            if line.startswith("+CMGL:"):
+                parsed = self._parse_header(line, "+CMGL")
+                if not parsed:
+                    continue
+                idx, st, num, ts = parsed
+                cur = {"index": idx, "status": STAT_MAP.get(st, st),
+                       "raw_status": st, "number": num, "time": ts, "text": ""}
+                msgs.append(cur)
+            elif cur is not None:
+                cur["text"] += ("\n" if cur["text"] else "") + ucs2_decode(line)
+        return msgs
+
+    def read(self, index):
+        lines, _ = self.cmd(f"AT+CMGR={index}", wait=5.0)
+        cur = None
+        for line in lines:
+            if line.startswith("+CMGR:"):
+                parsed = self._parse_header(line, "+CMGR")
+                if parsed:
+                    _, st, num, ts = parsed
+                    cur = {"index": index, "status": STAT_MAP.get(st, st),
+                           "raw_status": st, "number": num, "time": ts, "text": ""}
+            elif cur is not None:
+                cur["text"] += ("\n" if cur["text"] else "") + ucs2_decode(line)
+        return cur
+
+    def delete(self, index=None, flag=None):
+        if flag is not None:
+            out, err = self.cmd(f"AT+CMGD=0,{flag}", wait=8.0)
+        else:
+            out, err = self.cmd(f"AT+CMGD={index}", wait=8.0)
+        return not err
+
+    # ---- 发送
+    def send(self, number, text):
+        self.io.reset_input_buffer()
+        self.io.write(f'AT+CMGS="{ucs2_encode(number)}"\r'.encode())
+        _, got_prompt = self._read_until([b">"], 6.0)
+        if not got_prompt:
+            return False, "模块未返回 '>' 提示符（AT 口可能被其它进程占用）"
+        self.io.write((ucs2_encode(text) + "\x1a").encode())
+        buf, _ = self._read_until([b"OK\r", b"OK\n", b"+CMS ERROR", b"ERROR\r"], 30.0)
+        out = buf.decode("utf-8", "replace")
+        if "+CMGS:" in out:
+            m = re.search(r"\+CMGS:\s*(\d+)", out)
+            return True, (m.group(1) if m else "")
+        m = re.search(r"\+CMS ERROR:\s*(\d+)", out)
+        return False, (f"CMS ERROR {m.group(1)}" if m else "发送失败")
+
+
+# ---------------------------------------------------------------- 锁
+class AtLock:
+    """和其它 mt5700-sms 调用互斥（AT 口是共享资源；跨工具靠重试兜底）"""
+
+    def __init__(self, path=LOCK_PATH, timeout=20.0):
+        self.path, self.timeout = path, timeout
+
+    def __enter__(self):
+        self.fh = open(self.path, "w")
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.time() > deadline:
+                    raise SystemExit("mt5700-sms: 等待 AT 锁超时（%s）" % self.path)
+                time.sleep(0.3)
+
+    def __exit__(self, *a):
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+            self.fh.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- 通知 / 转发
+def log(msg):
+    try:
+        subprocess.run(["logger", "-t", "mt5700-sms", msg], timeout=5)
+    except Exception:
+        pass
+    print(msg, flush=True)
+
+
+def notify_local(cfg, msg):
+    if cfg["notify_led"] and cfg["led"]:
+        try:
+            subprocess.Popen(["/usr/bin/ledctl", "blink", cfg["led"], "4"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+def build_payload(cfg, msg, fmt):
+    host = os.uname().nodename
+    if fmt == "wecom":      # 企业微信群机器人
+        return {"msgtype": "text",
+                "text": {"content": f"[{host}] 新短信 {msg['number']}\n{msg['text']}"}}
+    if fmt == "text":
+        return None
+    return {"host": host, "index": msg["index"], "number": msg["number"],
+            "text": msg["text"], "time": msg["time"], "device": "NRadio C8"}
+
+
+def forward(cfg, msg):
+    if not cfg["forward_enabled"] or not cfg["forward_url"]:
+        return
+    fmt = cfg["forward_format"]
+    payload = build_payload(cfg, msg, fmt)
+    data = None
+    headers = {}
+    if fmt == "text":
+        data = f"{msg['number']} {msg['text']}".encode()
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+    else:
+        data = json.dumps(payload, ensure_ascii=False).encode()
+        headers["Content-Type"] = "application/json"
+    try:
+        import urllib.request
+        req = urllib.request.Request(cfg["forward_url"], data=data,
+                                     headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=cfg["forward_timeout"]) as r:
+            body = r.read(200).decode("utf-8", "replace")
+        log(f"转发成功（{fmt}）: {body[:120]}")
+    except Exception as e:
+        log(f"转发失败: {e}")
+
+
+def run_hook(cfg, msg):
+    hook = cfg["hook"]
+    if not hook or not os.path.exists(hook):
+        return
+    env = dict(os.environ, SMS_INDEX=str(msg["index"]), SMS_NUMBER=msg["number"],
+               SMS_TEXT=msg["text"], SMS_TIME=msg["time"])
+    try:
+        subprocess.run([hook, str(msg["index"]), msg["number"], msg["text"]],
+                       env=env, timeout=20)
+    except Exception as e:
+        log(f"钩子执行失败: {e}")
+
+
+# ---------------------------------------------------------------- 子命令
+def fmt_table(msgs):
+    if not msgs:
+        return "（无）"
+    out = [f"{'idx':>4}  {'状态':<7} {'号码':<20} 时间              正文"]
+    for m in msgs:
+        text = (m["text"] or "").replace("\n", " ")
+        if len(text) > 42:
+            text = text[:42] + "…"
+        out.append(f"{str(m['index']):>4}  {m['status']:<7} {m['number']:<20} "
+                   f"{m['time']:<17} {text}")
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="mt5700-sms", description="MT5700M 短信管理")
+    ap.add_argument("--json", action="store_true", help="JSON 输出")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("list", help="列出短信")
+    p.add_argument("filter", nargs="?", default="all",
+                   choices=["all", "unread", "read", "sent"])
+    sub.add_parser("read", help="读一条").add_argument("index", type=int)
+    p = sub.add_parser("send", help="发送")
+    p.add_argument("number")
+    p.add_argument("text")
+    p = sub.add_parser("delete", help="删除（手动清理）")
+    p.add_argument("what", help="<index> | read | sent | all")
+    sub.add_parser("count", help="未读条数")
+    p = sub.add_parser("watch", help="常驻：新短信通知+转发")
+    p.add_argument("--notify-existing", action="store_true",
+                   help="启动时把已有的未读也通知一遍（默认不通知，避免刷屏）")
+    p = sub.add_parser("test-notify", help="用假短信走一遍通知/转发/钩子（验证 webhook 配置）")
+    p.add_argument("--number", default="+8613800138000")
+    p.add_argument("--text", default="mt5700-sms 测试通知：webhook 配置验证")
+    p.add_argument("--index", type=int, default=0)
+
+    args = ap.parse_args()
+    cfg = load_config()
+
+    if args.cmd == "watch":
+        return cmd_watch(cfg, args)
+
+    if args.cmd == "test-notify":
+        msg = {"index": args.index, "number": args.number, "text": args.text,
+               "time": time.strftime("%y/%m/%d,%H:%M:%S+32"), "status": "unread"}
+        log(f"test-notify：模拟 #{msg['index']} 来自 {msg['number']}：{msg['text']}")
+        if not cfg["forward_enabled"] or not cfg["forward_url"]:
+            log("转发未启用（uci %s.main.forward_enabled/forward_url），只做本地提醒与钩子"
+                % CONFIG)
+        notify_local(cfg, msg)
+        forward(cfg, msg)
+        run_hook(cfg, msg)
+        log("test-notify 完成")
+        return 0
+
+    with AtLock():
+        m = Modem(cfg["at_port"])
+        try:
+            m.init_sms()
+            if args.cmd == "list":
+                msgs = m.list(LIST_ARG[args.filter])
+                if args.json:
+                    print(json.dumps(msgs, ensure_ascii=False, indent=2))
+                else:
+                    print(fmt_table(msgs))
+            elif args.cmd == "read":
+                msg = m.read(args.index)
+                if not msg:
+                    print(f"读取 #{args.index} 失败（可能不存在）", file=sys.stderr)
+                    return 1
+                if args.json:
+                    print(json.dumps(msg, ensure_ascii=False, indent=2))
+                else:
+                    print(f"# {msg['index']}  [{msg['status']}]  {msg['number']}  {msg['time']}\n")
+                    print(msg["text"])
+            elif args.cmd == "send":
+                ok, info = m.send(args.number, args.text)
+                print(f"发送{'成功 (CMGS=' + info + ')' if ok else '失败: ' + info}")
+                return 0 if ok else 1
+            elif args.cmd == "delete":
+                w = args.what.lower()
+                flag = {"read": 1, "sent": 3, "all": 4}.get(w)
+                if flag is not None:
+                    ok = m.delete(flag=flag)
+                    print(f"已删除{'已读' if w == 'read' else '已发送' if w == 'sent' else '全部'}短信"
+                          if ok else "删除失败")
+                else:
+                    try:
+                        idx = int(w)
+                    except ValueError:
+                        print("用法: mt5700-sms delete <index|read|sent|all>", file=sys.stderr)
+                        return 1
+                    ok = m.delete(index=idx)
+                    print(f"已删除 #{idx}" if ok else f"删除 #{idx} 失败")
+                return 0 if ok else 1
+            elif args.cmd == "count":
+                n = len(m.list("REC UNREAD"))
+                if args.json:
+                    print(json.dumps({"unread": n}, ensure_ascii=False))
+                else:
+                    print(n)
+        finally:
+            m.close()
+    return 0
+
+
+def cmd_watch(cfg, args):
+    if not cfg["enabled"]:
+        log("watch: 配置里已禁用（uci %s.main.enabled=0），退出" % CONFIG)
+        return 0
+    log(f"watch 启动：间隔 {cfg['interval']}s，转发 {'开(' + cfg['forward_format'] + ')' if cfg['forward_enabled'] and cfg['forward_url'] else '关'}，"
+        f"闪灯 {'开' if cfg['notify_led'] else '关'}")
+
+    seen = None
+    fails = 0
+    while True:
+        try:
+            with AtLock(timeout=15.0):
+                m = Modem(cfg["at_port"])
+                try:
+                    m.init_sms()
+                    unread = m.list("REC UNREAD")
+                finally:
+                    m.close()
+            fails = 0
+            idxs = {msg["index"] for msg in unread}
+            if seen is None:
+                seen = set() if args.notify_existing else set(idxs)
+                log(f"初始未读 {len(idxs)} 条：{sorted(idxs) if idxs else '无'}"
+                    + ("（按需通知）" if args.notify_existing else "（不重复通知）"))
+            for msg in unread:
+                if msg["index"] in seen:
+                    continue
+                log(f"新短信 #{msg['index']} 来自 {msg['number']}："
+                    + (msg["text"] or "").replace("\n", " ")[:120])
+                notify_local(cfg, msg)
+                forward(cfg, msg)
+                run_hook(cfg, msg)
+            seen = idxs
+        except SystemExit as e:
+            log(f"watch: {e}（稍后重试）")
+        except Exception as e:
+            fails += 1
+            log(f"watch: 轮询异常 {e}（第 {fails} 次）")
+            if fails > 10:
+                log("watch: 连续失败过多，退出让 procd 重启")
+                return 1
+            time.sleep(min(30, cfg["interval"] * fails))
+            continue
+        time.sleep(cfg["interval"])
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

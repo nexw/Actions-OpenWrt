@@ -1,0 +1,23 @@
+config sms 'main'
+	# 总开关：0 = 不启动新短信通知守护（查看/发送仍可手动用）
+	option enabled '1'
+	# 轮询未读的间隔（秒）。不用 +CMTI 抢 URC，因为 AT 口与面板/其它工具共享
+	option interval '10'
+	option at_port '/dev/ttyUSB1'
+
+	# 本地提醒：收到新短信时用 ledctl 闪一下（ledctl blink <led> <秒>）
+	option notify_led '1'
+	option led 'blue:indicator-1'
+
+	# 转发（默认关闭；填好 forward_url 再把 forward_enabled 改成 1 即生效）
+	option forward_enabled '0'
+	option forward_url ''
+	# json  = 本工具通用 JSON（host/index/number/text/time/device）
+	# wecom = 企业微信群机器人格式 {"msgtype":"text","text":{"content":"..."}}
+	# text  = 纯文本正文（POST body）
+	option forward_format 'json'
+	option forward_timeout '8'
+
+	# 额外钩子脚本（可选）：以 <index> <number> <text> 为参数执行，
+	# 另注入 SMS_INDEX/SMS_NUMBER/SMS_TEXT/SMS_TIME 环境变量
+	option hook ''

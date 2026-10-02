@@ -1,0 +1,32 @@
+#!/bin/sh /etc/rc.common
+#
+# mt5700sms — 5G 模组短信的新短信通知/转发守护
+#
+# 只做「新短信」这一件事：轮询未读集合 → 出现新 index 就记日志、闪灯、
+# 按配置转发（HTTP webhook / 企业微信机器人）、执行钩子脚本。
+# 查看/发送/删除由 /usr/bin/mt5700-sms 手动调用，不驻留。
+#
+# START=98：在 network(20) 与 modeminfo(98) 之后，确保 AT 口已就绪。
+#
+START=98
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	config_load mt5700sms
+	config_get_bool enabled main enabled 1
+	if [ "$enabled" != "1" ]; then
+		logger -t mt5700sms "已禁用（uci mt5700sms.main.enabled=0），不启动通知守护"
+		return 0
+	fi
+	procd_open_instance
+	procd_set_param command /usr/bin/mt5700-sms watch
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	logger -t mt5700sms "已停止"
+}
