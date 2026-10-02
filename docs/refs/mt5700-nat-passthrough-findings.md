@@ -42,3 +42,29 @@ C8 官方固件内 `/usr/bin/UpdateWizard_MT5700` + `cloudd/firmware.lua` 从 NR
 2. 现状双 NAT：性能无虞（实测 **148 Mbps**），仅端口映射需连做两层。
 3. 模块 DMZ 指向 C8 的 WAN IP：入站可达，出站仍双层。
 4. 等具备 `AT^SETDIRECTIP` 且保留网络 AT 的新固件（取决于 TD Tech/NRadio）。
+
+
+---
+
+# 补充（2026-10-02，基于用户提供的新资料）
+
+## 资料清单（~/workspace）
+| 文件 | 内容 |
+|---|---|
+| `MT5700M-CN 5G系列模组AT命令手册(1).pdf` | 官方 AT 手册（546 页，文档版本 01，2024-05-17）。**`SETDIRECTIP` 全文 0 命中**；`AT^TDCFG` 正文只定义 mode **1/2**；含 `AT^NDISDUP`（NDIS 拨号）、`AT^DHCP`、`AT^IPFILTERSWITCH`、`AT^SETE5STICK`、`AT^GNETFEATURE`(5G LAN) 等 |
+| `.../网口stick操作.txt`（208 字节，官方） | **IP 直通标准配方**：① 升级到最新版本 ② `at^tdcfg="infcfg","mode",3`，重启生效 ③ **入网拨号 `at^ndisdup=8,1`**，完成后下挂 PC 拿到 IP（抓网口日志另加 `AT^LOGPORT=2`） |
+| `MT5700M-CN_Update_9.9.9.9(SP1C01)-debug-sec.exe`（80MB，2025-04-27，RAR 内） | **支持"IP 直通下发 10 地址"的测试/调试版模组固件升级器**。华为 Balong 升级框架；内含 `onchip.img`/`share_sec.bin`/`share_nsro.bin`/`comm.bin`/`dtcust.img`/`lpmcu_tcm.bin` 等组件；NV 配置 `MBB_NV_DIFF_CONFIG_hi9510_MT5700M_*.xml`；升级 AT 流程：`AT^SIGNVER=?`(签名校验) → `AT^NVBACKUP` → `AT^GODLOAD`(下载模式) → `AT^NVRESTORE` → `AT^SETMODE=1` → `AT^RESET` |
+| `mt5700webui-openwrt-server_2.7(.zip)` | Windows 版模组 WebUI 服务（luajit + 混淆 Lua），与本机网络模式无关 |
+
+## 实测（本机 B014）
+- `AT^TDCFG="infcfg","mode",3` **可写入**（本机 `Mode: 3` 可查询），但**数据面未直通**：
+  - `AT^NDISDUP=8,1` → `ERROR: DUPLICATED`（自动拨号已占 CID8）
+  - 关闭自动拨号后 `AT^NDISDUP=8,0/1` 仍不能让下游拿到运营商 IP：路由器 WAN 继续从模组 DHCP 得到 `192.168.8.x`
+- 结论：**mode-3 直通需要升级模组固件**（与官方说明第 1 条一致）；本机 B014 只接受该配置项，不实现数据面。
+- 已恢复 `mode=1` + `AT^SETAUTODIAL=1,2` + `AT^RESET`（WAN `192.168.8.140`，联网正常）。
+
+## 手册补充要点
+- `AT^TDCFG` 字段：`Mode`(1/2)、`Dmz`("hostIP"/"0")、`PostRoute`(0/1/2)、`LHCM`(<lanIP>,<mask>,<start>,<end>)、`Share-pdp`(0/1，仅 USB Stick 模式)。
+- 官方约束：**DMZ 与后路由互斥**；DMZ/后路由需在**拨号前**配置、**断开拨号后**删除；用后路由需先 `AT^IPFILTERSWITCH=0` + `AT+CFUN=0/1` 再拨号；`mode`/`LHCM`/`Share-pdp` **重启生效**。
+- `AT^IPFILTERSWITCH=<0|1>`：IP 地址过滤开关（默认 0；本机当前为 1）。
+- `AT^GNETFEATURE=0,1`：给网卡开启 **5G LAN** 特性（USB 单网卡用 0x01）。
