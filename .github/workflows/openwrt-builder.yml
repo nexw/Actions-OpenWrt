@@ -95,8 +95,17 @@ jobs:
         make defconfig
         # ---- 诊断：本地包为什么没进 .config ----
         echo "==== 诊断 ===="
-        echo "--- openwrt/package/ 下由本仓库提供的包 ---"
-        ls -d package/luci-app-* 2>/dev/null | head -10
+        echo "--- 本地包安装位置（feeds/nrlocal 或 package/）---"
+        ls -d package/feeds/nrlocal/*/ 2>/dev/null | head -5
+        ls -d package/luci-app-* 2>/dev/null | head -5 || true
+        echo "--- 探针：直接 dump 该包的元数据（看 Package 定义是否存在）---"
+        ( cd package/feeds/nrlocal/luci-app-wtmodem 2>/dev/null || cd package/luci-app-wtmodem 2>/dev/null ) && {
+          make -pn -f Makefile > /tmp/db.txt 2>/tmp/db.err; echo "    make -pn rc=$?"
+          sed -n '1,8p' /tmp/db.err | sed 's/^/    stderr: /'
+          printf '    Package/luci-app-wtmodem 定义数: '; grep -c "^Package/luci-app-wtmodem" /tmp/db.txt || true
+          printf '    DEPENDS:            '; grep -m1 "^DEPENDS" /tmp/db.txt || true
+          printf '    PKG_NAME:           '; grep -m1 "^PKG_NAME" /tmp/db.txt || true
+        }
         echo "--- package/luci-app-wtmodem 内容 ---"
         ls -la package/luci-app-wtmodem 2>&1 | head -10
         echo "--- 包目录文件列表缓存 tmp/.packagedirs ---"

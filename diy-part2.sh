@@ -29,14 +29,19 @@ done
 #   b) 清掉 tmp/ 下的包元数据缓存 —— 否则 make defconfig 可能还在用旧索引，
 #      把本地包的 CONFIG_PACKAGE_* 当成未知符号静默删掉（实测踩过：
 #      luci-app-wtmodem / luci-app-cellscan 被 defconfig 丢掉，但没任何报错）
-for p in "$GITHUB_WORKSPACE"/packages/*/; do
+for p in "$GITHUB_WORKSPACE"/packages/*/*/; do
     [ -d "$p" ] || continue
     name=$(basename "$p")
-    if [ ! -f "$OPENWRT/package/$name/Makefile" ]; then
-        echo "错误：openwrt/package/$name/Makefile 不存在（diy-part1 没拷进来？）" >&2
+    found=""
+    for cand in "$OPENWRT/package/feeds/nrlocal/$name" "$OPENWRT/package/$name"; do
+        [ -f "$cand/Makefile" ] && found=$cand && break
+    done
+    if [ -z "$found" ]; then
+        echo "错误：本地包 $name 没出现在 openwrt/package/{feeds/nrlocal/,} 下" >&2
+        ls -la "$OPENWRT/package/feeds/" 2>/dev/null | head >&2
         exit 1
     fi
-    echo "local package ok: $name"
+    echo "local package ok: $name -> ${found#$OPENWRT/}"
 done
 # .packagedirs 是「包目录文件列表」缓存；如果它是在本地包拷进来之前生成的，
 # 扫描阶段就永远看不到我们的包（连一个警告都不会有，症状就是 config 符号缺失）。

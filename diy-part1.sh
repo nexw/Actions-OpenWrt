@@ -23,17 +23,19 @@ for repo in \
     fi
 done
 
-# ---- 本仓库自带的本地包（改动过，不能用 feed）----
-# 模块(5G)管理：luci-app-WTModem（蜂窝面板）/ luci-app-cellscan（邻区扫描）
-# 两者都针对 MT5700M 适配过，源码就在仓库 packages/ 下，这里拷进 openwrt 树。
-# 注意：本脚本在 feeds update/install **之前**、cwd=openwrt 执行，
-#       所以 defconfig 时它们已经在 package/ 里，CONFIG_PACKAGE_* 才生效。
-for p in "$GITHUB_WORKSPACE"/packages/*/; do
-    [ -d "$p" ] || continue
-    name=$(basename "$p")
-    echo "install local package: $name"
-    rm -rf "package/$name"
-    cp -r "$p" "package/$name"
-done
+# ---- 本仓库自带的本地包：做成 src-link feed ----
+# 结构：packages/<category>/<pkg>（feed 的标准布局：分类目录/包目录）
+# 为什么不用 `cp -r packages/* openwrt/package/`：实测直接拷进 package/ 时，
+# make defconfig 不会给它们生成 config 符号（tmp/.config-package.in 里根本没有
+# config PACKAGE_luci-app-*，而且连一条 build-dependency 警告都没有）——
+# 像是包压根没进扫描范围。改走 feeds 机制（所有 feed 包都这样装）最稳。
+if [ -d "$GITHUB_WORKSPACE/packages" ]; then
+    [ -f feeds.conf ] || cp feeds.conf.default feeds.conf
+    if ! grep -q '^src-link nrlocal ' feeds.conf; then
+        echo "src-link nrlocal $GITHUB_WORKSPACE/packages" >> feeds.conf
+    fi
+    echo "已注册本地 feed: nrlocal -> $GITHUB_WORKSPACE/packages"
+    grep -n nrlocal feeds.conf
+fi
 
 echo "diy-part1 done"
