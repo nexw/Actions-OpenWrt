@@ -38,8 +38,12 @@ for p in "$GITHUB_WORKSPACE"/packages/*/; do
     fi
     echo "local package ok: $name"
 done
+# .packagedirs 是「包目录文件列表」缓存；如果它是在本地包拷进来之前生成的，
+# 扫描阶段就永远看不到我们的包（连一个警告都不会有，症状就是 config 符号缺失）。
 rm -f "$OPENWRT/tmp/.packageinfo" "$OPENWRT/tmp/.config-package.in" \
-      "$OPENWRT/tmp/.targetinfo" "$OPENWRT/tmp/.config-target.in"
-echo "已清理 tmp/ 包元数据缓存（下次 make defconfig 会重新扫描）"
+      "$OPENWRT/tmp/.targetinfo" "$OPENWRT/tmp/.config-target.in" \
+      "$OPENWRT/tmp/.packagedirs" "$OPENWRT/tmp/.packagedirs.tmp" \
+      "$OPENWRT/tmp/.targetdirs" "$OPENWRT/tmp/.targetinfo.tmp"
+echo "已清理 tmp/ 包元数据与包目录缓存（下次 make defconfig 会重新扫描）"
 
 echo "diy-part2 done"

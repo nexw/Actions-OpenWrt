@@ -99,6 +99,14 @@ jobs:
         ls -d package/luci-app-* 2>/dev/null | head -10
         echo "--- package/luci-app-wtmodem 内容 ---"
         ls -la package/luci-app-wtmodem 2>&1 | head -10
+        echo "--- 包目录文件列表缓存 tmp/.packagedirs ---"
+        if [ -f tmp/.packagedirs ]; then
+          wc -l < tmp/.packagedirs | sed 's/^/  总条目: /'
+          grep -cE "package/luci-app-(wtmodem|cellscan)/Makefile" tmp/.packagedirs \
+            || echo "  !! 我们的包不在文件列表里（就是它导致扫描不到）"
+        else
+          echo "  tmp/.packagedirs 不存在"
+        fi
         echo "--- 生成的 Kconfig 里是否注册了符号 ---"
         for p in luci-app-wtmodem luci-app-cellscan; do
           printf '  %s: ' "$p"
