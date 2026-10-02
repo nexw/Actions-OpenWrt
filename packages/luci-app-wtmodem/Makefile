@@ -19,7 +19,7 @@
 #
 include $(TOPDIR)/rules.mk
 
-PKG_NAME:=luci-app-WTModem
+PKG_NAME:=luci-app-wtmodem
 PKG_VERSION:=1.3
 PKG_RELEASE:=1
 

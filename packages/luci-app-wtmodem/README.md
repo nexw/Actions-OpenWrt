@@ -1,4 +1,8 @@
-# luci-app-WTModem（本仓库裁剪版）
+# luci-app-wtmodem（本仓库裁剪版）
+
+> 上游包名是 `luci-app-WTModem`（含大写）。本仓库改成全小写 `luci-app-wtmodem` ——
+> 25.12 用 apk 打包，包名保持传统全小写更稳妥；功能与菜单显示不受影响。
+
 
 内置蜂窝模组面板。上游为 Manper 的 rebuild 版，取自
 [zhongweijie95/NRadio-CPE-NO2](https://github.com/zhongweijie95/NRadio-CPE-NO2)

@@ -93,6 +93,19 @@ jobs:
       run: |
         cd openwrt
         make defconfig
+        # 快速失败：确认本仓库自带的本地包真的被 defconfig 选中了。
+        # 否则要等 2.5 小时才在编译末尾报“找不到包/依赖缺失”，代价太大。
+        missing=0
+        for p in luci-app-wtmodem luci-app-cellscan luci-compat luci-lua-runtime luci-lib-nixio; do
+          if grep -q "^CONFIG_PACKAGE_$p=y" .config; then
+            echo "  OK   CONFIG_PACKAGE_$p=y"
+          else
+            echo "::error::CONFIG_PACKAGE_$p 未被选中（本地包没拷进 package/？依赖缺失？）"
+            grep -n "$p" .config | head -5 || true
+            missing=1
+          fi
+        done
+        [ "$missing" = 0 ] || exit 1
         grep -E '^CONFIG_TARGET.*DEVICE.*=y' .config
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
