@@ -35,3 +35,13 @@ LUCI_PKGARCH:=all
 LUCI_DEPENDS:=+luci-compat +luci-lib-nixio
 
 include $(TOPDIR)/feeds/luci/luci.mk
+
+# call BuildPackage - OpenWrt buildroot signature
+#
+# ⚠️ 这行注释不是装饰，必须有：
+# include/scan.mk 生成包列表时用的是
+#   find -L <dir> -name Makefile | xargs grep -aHE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)'
+# 即在 Makefile 文本里 grep "call BuildPackage" 字样。本包的包定义在 luci.mk 里
+# （$(eval $(call BuildPackage,...))），自己文件里没有这段文字就会被整份过滤掉，
+# 表现为 make defconfig 完全不知道这个包存在：tmp/.config-package.in 里没有
+# config PACKAGE_<name>、连一条警告都没有。删了这行包就会“消失”。
