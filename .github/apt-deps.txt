@@ -1,22 +1,31 @@
 # OpenWrt / immortalwrt 构建的宿主 APT 依赖（单一来源）
 #
+# 来源（2026-10-03 对齐）：
+#   - immortalwrt README.md @ v25.12.2（本仓库 BUILD_BRANCH 所 pin 的 tag）
+#     "Development > Requirements > Setup dependencies via APT"
+#   - immortalwrt build-scripts/init_build_environment.sh（官方一键环境脚本，更权威）
+#   两者基本一致；脚本用版本化的 gcc-$V / clang-$LLVM，README 用不带版本号的名字。
+#   在 ubuntu-24.04 上二者等价：默认 gcc = 13、默认 clang/llvm = 18，
+#   正是脚本给 noble 指定的 GCC_VERSION=13 / LLVM_VERSION=18。
+#
 # 谁在用：
 #   - .github/workflows/openwrt-builder.yml 的 "Initialization environment"（安装）
 #   - .github/workflows/env-probe.yml        （核对 22.04 / 24.04 上是否都存在）
 # 改这里一处即可，不要再往 workflow 里塞包名。
-#
-# 格式：一行一个包；`#` 开头与空行忽略。
-# 背景与剔除记录见 docs/RFC-nradio-c8-native-firmware.md §5.1.3。
+# 与官方清单的差异只有末尾标注「CI 附加」的几项，理由见 docs/RFC §5.1.3。
 
-# --- 1. 编译器与多架构支持 -------------------------------------------------
-# OpenWrt 的 host 工具链与部分 32 位工具需要 multilib（x86_64 → i386）。
+# --- 1. 编译器与多架构支持（对应上游 gcc-$V / g++-$V / *-multilib）----------
 build-essential
+clang
+lld
+llvm
+binutils
 gcc-multilib
 g++-multilib
 libc6-dev-i386
-binutils
+lib32gcc-s1
 
-# --- 2. 构建系统 / autotools / 代码生成 ------------------------------------
+# --- 2. autotools / 构建系统 / 代码生成 -------------------------------------
 autoconf
 automake
 autopoint
@@ -25,6 +34,7 @@ gettext
 bison
 flex
 gperf
+re2c
 gawk
 pkgconf
 cmake
@@ -33,9 +43,8 @@ scons
 patch
 rsync
 ccache
-tar
 
-# --- 3. 归档、下载、版本控制、系统小工具 -----------------------------------
+# --- 3. 归档、下载、版本控制、常用小工具 -----------------------------------
 bzip2
 unzip
 p7zip
@@ -46,66 +55,62 @@ wget
 git
 subversion
 xxd
+zstd
 haveged
 device-tree-compiler
 
-# --- 4. 固件/镜像工具 ------------------------------------------------------
+# --- 4. 官方清单里的编辑器/串口/邮件等（CI 用不到，但保持与上游一致）--------
+nano
+vim
+ack
+lrzsz
+msmtp
+qemu-utils
+
+# --- 5. 镜像 / 固件 / 打包工具 ----------------------------------------------
 squashfs-tools
 mkisofs
 upx-ucl
 fastjar
+ecj
 
-# --- 5. 宿主库（-dev）------------------------------------------------------
+# --- 6. 宿主库（-dev）-------------------------------------------------------
 zlib1g-dev
+libz-dev            # 虚拟包，由 zlib1g-dev 提供（与上游保持一致，装它无副作用）
 libssl-dev
-libncurses5-dev
-libncursesw5-dev
+gnutls-dev
+libncurses-dev
 libreadline-dev
 libelf-dev
-libfuse-dev
 libglib2.0-dev
 libgmp3-dev
 libltdl-dev
 libmpc-dev
 libmpfr-dev
-liblzma-dev
-libev-dev
-libtirpc-dev
+libyaml-dev
 libpython3-dev
 
-# --- 6. man / 文档生成 ------------------------------------------------------
+# --- 7. man / 文档生成 ------------------------------------------------------
 asciidoc
 xmlto
 help2man
 texinfo
 intltool
 
-# --- 7. Python3（host 侧）与其余工具 ---------------------------------------
-# immortalwrt master 的 include/prereq-build.mk 自检要求 host python3，
-# 不需要 python2（见 RFC §5.1.2 的证据）。
+# --- 8. Python3（host 侧）---------------------------------------------------
+# immortalwrt 的 include/prereq-build.mk 自检要求 host python3，不需要 python2。
 python3
+python3-pip
+python3-ply
 python3-pyelftools
-python3-setuptools
+python3-docutils
+
+# --- 9. 其它官方条目 --------------------------------------------------------
 swig
 uglifyjs
 antlr3
 
-# ===========================================================================
-# 已剔除（2026-10-03）——它们对"单一目标 mediatek/filogic + 无交互 CI"无用：
-#   python2.7   证据：完整构建日志里 python2 只出现在 apt 安装记录，零次执行；
-#                     .config 与仓库脚本均无 python2 引用（RFC §5.1.2）
-#   ack         perl 版 grep，仓库与上游构建流程都未引用（P3TERX 遗留）
-#   lrzsz       串口 zmodem 传输，CI 里没有串口
-#   msmtp       发邮件，本 workflow 无邮件步骤（也没有通知步骤）
-#   vim         交互式编辑器，CI 无人工介入（调试请用 main.yml 的 tmate）
-#   qemu-utils  qemu-img 只服务于 x86 的 VHDX/VMDK 等镜像格式，本目标是
-#               mediatek/filogic（mkimage + ptgen + squashfs）
-#
-# 尚未证实有用、但保留（下一轮构建验证后再决定是否剔除）：
-#   mkisofs  —— 同类理由（ISO 仅 x86 用），但它同时是 genisoimage 的过渡名，
-#               剔除收益极小、失败在镜像阶段（很晚），不值得冒险
-#   upx-ucl  —— 只服务部分 bootloader 压缩，未确认 feeds 里的包是否引用
-#   antlr3 / fastjar / scons / intltool / asciidoc / xmlto / help2man /
-#   texinfo / subversion / swig / uglifyjs / p7zip* —— 上游通用依赖清单的
-#   一部分，是否被本目标实际用到需靠一轮完整构建的日志来判定
-# ===========================================================================
+# --- 10. CI 附加（不在 immortalwrt 清单内，仅本 CI 需要）--------------------
+tar                 # Debian 的 essential 包，上游清单因此不列；显式写出便于阅读
+python3-setuptools  # 24.04 起 distutils 自 stdlib 移除，靠它提供 distutils 兼容层
+                    # （构建日志里的 `Checking 'python3-distutils'` 自检）

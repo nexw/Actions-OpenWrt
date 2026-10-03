@@ -2,8 +2,8 @@
 # File: .github/workflows/env-probe.yml
 # Description: 只读探针 —— 核对 .github/apt-deps.txt 在 22.04 / 24.04 runner 上
 #
-# 目的：回答「把 openwrt-builder 从 ubuntu-22.04 升到 ubuntu-24.04 会缺什么」，
-#       用 1 分钟而不是一轮 2.5h 构建。
+# 目的：回答「把 openwrt-builder 从 ubuntu-22.04 升到 ubuntu-24.04 会缺什么」/
+#       「官方依赖清单在本 runner 上是否都能装上」，用 1 分钟而不是一轮 2.5h 构建。
 #       同时打印 apt 源布局（22.04 的 sources.list vs 24.04 的 deb822
 #       sources.list.d/ubuntu.sources）与 host python 情况，用于确认
 #       builder 里「只删第三方源、保留 ubuntu.sources」的策略。
@@ -60,16 +60,19 @@ jobs:
     - name: Check .github/apt-deps.txt availability
       run: |
         mkdir -p report
-        mapfile -t deps < <(grep -vE '^[[:space:]]*(#|$)' .github/apt-deps.txt)
+        # 解析同 builder：去 `#` 注释、按空白切词，允许行内注释。
+        mapfile -t deps < <(sed 's/#.*//' .github/apt-deps.txt | tr -s '[:space:]' '\n' | grep -vE '^$')
         : > report/missing.txt
         ok=0
         for p in "${deps[@]}"; do
-          if apt-cache show "$p" >/dev/null 2>&1; then
+          # 用逐个 simulate 而不是 apt-cache show：`libz-dev` 这类虚拟包在
+          # Packages 索引里没有自己的条目，apt-cache show 会误报缺失。
+          if sudo apt-get -s install -y -o Acquire::Retries=3 "$p" >/dev/null 2>&1; then
             ok=$((ok+1))
             echo "OK      $p" >> report/available.txt
           else
             echo "$p" >> report/missing.txt
-            echo "::warning title=apt 包不存在（${{ matrix.os }}）::$p"
+            echo "::warning title=apt 包不可用（${{ matrix.os }}）::$p"
           fi
         done
         {
@@ -94,7 +97,7 @@ jobs:
       if: always()
       run: |
         mkdir -p report
-        deps=$(grep -vE '^[[:space:]]*(#|$)' .github/apt-deps.txt | tr '\n' ' ')
+        deps=$(sed 's/#.*//' .github/apt-deps.txt | tr -s '[:space:]' '\n' | grep -vE '^$' | tr '\n' ' ')
         if sudo apt-get -s install -y -o Acquire::Retries=3 $deps > report/simulate.txt 2>&1; then
           echo "simulate 通过：将新增/升级 $(grep -c '^Inst ' report/simulate.txt) 个包"
           tail -3 report/simulate.txt
