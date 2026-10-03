@@ -6,15 +6,28 @@
 name: OpenWrt Builder
 
 on:
+  # 只有 update-checker dispatch 这个事件类型时才触发；不限定 types 的话任何
+  # repository_dispatch 都会拉起一轮 2.5h 构建。
   repository_dispatch:
+    types: [Source Code Update]
   workflow_dispatch:
+
+# 上传 Release 需 contents:write；Mattraks/delete-workflow-runs 需 actions:write。
+# 不显式声明就依赖仓库默认 token 权限（新仓库/收紧策略后为只读，届时才在末尾步骤报错）。
+permissions:
+  contents: write
+  actions: write
+
+# 同一时间只跑一轮：Release tag 是“分钟”精度（date +%Y.%m.%d-%H%M），并发会抢同一个 tag，
+# 也白烧 Actions 额度。
+concurrency:
+  group: openwrt-builder
+  cancel-in-progress: false
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
-  REPO_BRANCH: master
-  # immutable 最新发行版 tag（可复现；openwrt-25.12 分支的发行点）
+  # 可复现：pin 到 immortalwrt 发行 tag（openwrt-25.12 分支的发行点）
   BUILD_BRANCH: v25.12.2
-  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
@@ -26,30 +39,52 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04      # 固定版本便于复现；升 24.04 的真实阻塞点见 RFC §5.1.2（与 python2.7 无关）
+    # 不写就是 6h 上限；失败重跑场景会白烧额度（RFC §5.1 对额度敏感）
+    timeout-minutes: 300
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: Restore ccache
       uses: actions/cache@v4
       with:
+        # actions/cache 的条目不可变：key 固定 => 命中后不再写回，ccache 自首次保存起
+        # 就停止增长。加 run_id 让每轮都能写回，命中交给 restore-keys 前缀
+        # （优先精确 .config，再退化到分支级）。
         path: /home/runner/.ccache
-        key: ccache-${{ env.BUILD_BRANCH }}-${{ hashFiles('.config') }}
+        key: ccache-${{ env.BUILD_BRANCH }}-${{ hashFiles('.config') }}-${{ github.run_id }}
         restore-keys: |
+          ccache-${{ env.BUILD_BRANCH }}-${{ hashFiles('.config') }}-
           ccache-${{ env.BUILD_BRANCH }}-
 
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install tar ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev libev-dev libtirpc-dev liblzma-dev
+        # ---- 1. 腾空间：镜像自带、构建用不到的大件 ----
+        # 末尾几个在 24.04 镜像里本就不存在，`rm -rf` 对不存在的路径容错，不用分支判断。
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+                    /usr/local/share/boost /opt/az /opt/microsoft /usr/share/swift
+        # daemon 未起时非 0；GH runner 默认 `bash -e`，不兜底会中断整步
+        sudo docker image prune --all --force || true
+
+        # ---- 2. 只删第三方 apt 源，不碰 Ubuntu 自己的 ----
+        # 22.04 主源在 /etc/apt/sources.list；24.04 改成 deb822，主源在
+        # /etc/apt/sources.list.d/ubuntu.sources —— 整目录删会把主源删掉，apt 全挂。
+        sudo find /etc/apt/sources.list.d -maxdepth 1 -type f ! -name 'ubuntu.sources' -delete || true
+
+        # ---- 3. 安装宿主依赖（清单单一来源：.github/apt-deps.txt）----
+        DEPS=$(grep -vE '^[[:space:]]*(#|$)' "$GITHUB_WORKSPACE/.github/apt-deps.txt" | tr '\n' ' ')
+        echo "apt 依赖清单：$(echo $DEPS | wc -w) 个包"
+        sudo -E apt-get -qq update -o Acquire::Retries=3
+        # --no-upgrade：不顺手升级 runner 上已有的包（少下载、少变量）
+        sudo -E apt-get -qq install -y --no-upgrade -o Acquire::Retries=3 $DEPS
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
+
+        # ---- 4. 时区与工作目录 ----
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
@@ -66,12 +101,30 @@ jobs:
         echo "immortalwrt commit: $(git rev-parse HEAD)"
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
+    - name: Restore download cache (dl)
+      uses: actions/cache@v4
+      with:
+        # 必须用真实路径：$GITHUB_WORKSPACE/openwrt 是指向 /workdir/openwrt 的软链，
+        # tar 不跟随软链，缓存到的只会是链接本身。
+        # 每轮 make download 都要重下 GB 级源码，这是编译之外最大的固定开销。
+        path: /workdir/openwrt/dl
+        key: dl-${{ env.BUILD_BRANCH }}-${{ hashFiles('.config') }}-${{ github.run_id }}
+        restore-keys: |
+          dl-${{ env.BUILD_BRANCH }}-${{ hashFiles('.config') }}-
+          dl-${{ env.BUILD_BRANCH }}-
+
     - name: Load custom feeds (extra packages / local feed)
       run: |
         # 说明：原先这里调用的 diy-part1.sh 已内联到本步骤（2026-10-03）。
         #       必须在 `feeds update` **之前** 执行：feeds.conf 要先就位。
         #       仓库根目录从此不再有 diy-part*.sh；按需保留的独立脚本统一放 scripts/。
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        # 可选：仓库根放 feeds.conf.default 可覆盖上游定义（当前仓库没有）。
+        # 原写法 `[ -e $FEEDS_CONF ] && mv $FEEDS_CONF ...` 在变量缺失/为空时，`mv`
+        # 只剩一个参数会报错并让整步失败 —— 改成显式判空 + 文件存在才动。
+        if [ -f feeds.conf.default ]; then
+          mv feeds.conf.default openwrt/feeds.conf.default
+          echo "已用仓库根的 feeds.conf.default 覆盖上游定义"
+        fi
         cd openwrt
         echo "openwrt tree : $(pwd)"
 
@@ -175,6 +228,12 @@ jobs:
           fi
         fi
 
+    - name: Pre-build environment check
+      run: |
+        echo "--- 编译前磁盘与 ccache（留档，便于事后判断 no space 与缓存命中）---"
+        df -hT / /workdir || true
+        ccache -s || true
+
     - name: Download package
       id: package
       run: |
@@ -217,23 +276,35 @@ jobs:
         cd openwrt
         echo -e "$(nproc) thread compile"
         grep -q '^CONFIG_CCACHE=y' .config && echo "ccache enabled: $(ccache -s | head -3)"
-        if make -j$(nproc) || make -j1 || make -j1 V=s; then
+        # 快速失败：原写法 `|| make -j1 || make -j1 V=s` 会在并行失败后再串行续跑，多数
+        # 情况下跑不完；且撞 timeout 时算 cancelled（failure() 不触发），连日志都留不下。
+        # pipefail 只在子 shell 里生效（不动本步其他命令），保证 tee 不吞掉 make 的退出码。
+        # 日志写到工作区真实路径：openwrt 是软链，artifact 上传不跟软链。
+        if ( set -o pipefail; make -j$(nproc) 2>&1 | tee "$GITHUB_WORKSPACE/build.log" ); then
           echo "status=success" >> $GITHUB_OUTPUT
         else
           echo "status=failure" >> $GITHUB_OUTPUT
-          echo "::error::编译失败，不会上传/发布产物"
+          echo "::error::编译失败，详见 build-log artifact；不会上传/发布产物"
           exit 1
         fi
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
+    - name: Upload build log on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: build.log
+        if-no-files-found: ignore
+
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -249,7 +320,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -266,7 +337,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
+      uses: softprops/action-gh-release@v2
       if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -276,16 +347,20 @@ jobs:
         files: ${{ env.FIRMWARE }}/*
 
     - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
+      uses: Mattraks/delete-workflow-runs@v2
       continue-on-error: true
       with:
         retain_days: 0
         keep_minimum_runs: 2
 
     - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
+      uses: dev-drprasad/delete-older-releases@v0.3.3
       continue-on-error: true
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      env:
+        # 该 action 从环境变量读 token（没有默认值）。原先缺这一项 => 失败，而
+        # continue-on-error 把失败吞掉 => 旧 Release 从来没被清过。
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         keep_latest: 3
         delete_tags: true

@@ -80,7 +80,11 @@
 **约定：CI 逻辑只写在 `.github/workflows/openwrt-builder.yml` 里，仓库根目录不放脚本。**
 P3TERX 模板带来的 `diy-part1.sh` / `diy-part2.sh` 已于 2026-10-03 内联进 workflow
 （分别对应 `Load custom feeds` 与 `Load custom configuration` 两步），逻辑逐行等价，
-不再需要 `chmod +x` 与跨文件跳转。`scripts/` 只保留**需要独立运行**的本地工具：
+不再需要 `chmod +x` 与跨文件跳转。CI 侧另有两个非脚本文件：
+`.github/apt-deps.txt`（宿主 apt 依赖的**单一来源**，builder 与 `env-probe.yml` 共用）
+与 `.github/workflows/env-probe.yml`（手动触发的只读探针：核对 22.04/24.04 上这些包
+是否都存在、apt 源布局、host python），依据见 RFC §5.1.2 / §5.1.3。
+`scripts/` 只保留**需要独立运行**的本地工具：
 
 | 脚本 | 在哪跑 | 作用 | 写设备？ |
 |---|---|---|---|
