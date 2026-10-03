@@ -13,6 +13,12 @@ name: Env Probe
 
 on:
   workflow_dispatch:
+  # TEMP（验证用，跑完即移除）：workflow_dispatch 要求文件已存在于默认分支，
+  # 先用 pull_request 让本探针在 PR 上跑一次。
+  pull_request:
+    paths:
+      - '.github/apt-deps.txt'
+      - '.github/workflows/env-probe.yml'
 
 permissions:
   contents: read
