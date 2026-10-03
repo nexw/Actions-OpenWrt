@@ -1,0 +1,78 @@
+#!/bin/sh
+# wifi-survey — 无线环境实测（信道占用率 + 邻区 + 客户端链路）
+#
+# 只用固件自带的 iw / iwinfo，无需额外软件包。用于评估"真实空间"的无线状况：
+#   1) 当前工作信道的占用率（channel busy time / active time，按间隔采样）
+#   2) 两个频段扫描到的邻区（信道、信号强度、SSID）
+#   3) 已关联客户端的链路质量（RSSI / MCS / 重传，来自 iw station dump）
+#
+# 用法: wifi-survey [采样秒数]     默认 5 秒
+#
+# 判读参考（信道占用率）：
+#   <10%  空闲，可考虑更宽频宽
+#   10-30% 轻载，20MHz/80MHz 合适
+#   30-60% 中载，避免加宽（40MHz/160MHz 会显著抬高冲突）
+#   >60%  重载，务必窄频宽并换信道
+
+SAMPLE="${1:-5}"
+
+ap_ifaces() {
+	for d in /sys/class/net/*; do
+		n="${d##*/}"
+		iwinfo "$n" info 2>/dev/null | grep -q "Mode: Master" && echo "$n"
+	done
+}
+
+# 当前工作信道的累计 active/busy（毫秒）
+survey_raw() {
+	iw dev "$1" survey dump 2>/dev/null | awk '
+		/frequency:/ { u = ($0 ~ /\[in use\]/) }
+		u && /active time:/ { a = $4 }
+		u && /busy time:/   { b = $4 }
+		END { printf "%d %d\n", a, b }'
+}
+
+# 扫描邻区 -> "信道<TAB>信号<TAB>SSID"
+neigh() {
+	iwinfo "$1" scan 2>/dev/null | awk '
+		/ESSID:/     { e = $0; sub(/.*ESSID: */, "", e); gsub(/"/, "", e) }
+		/Frequency:/ { if (match($0, /Channel: [0-9]+/)) ch = substr($0, RSTART + 9, RLENGTH - 9) }
+		/Signal:/    { s = $0; sub(/.*Signal: */, "", s); sub(/ .*/, "", s);
+		               if (ch != "") { printf "%s\t%s\t%s\n", ch, s, e; ch = "" } }'
+}
+
+echo "wifi-survey: 采样 ${SAMPLE}s ..."
+for iface in $(ap_ifaces); do
+	info="$(iwinfo "$iface" info 2>/dev/null)"
+	ch="$(echo "$info"  | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')"
+	mode="$(echo "$info" | sed -n 's/.*HT Mode: *\([A-Za-z0-9]*\).*/\1/p')"
+	txp="$(echo "$info"  | sed -n 's/.*Tx-Power: *\([0-9.]*\) dBm.*/\1/p')"
+	if [ "${ch:-0}" -le 14 ] 2>/dev/null; then band="2.4G"; else band="5G"; fi
+
+	set -- $(survey_raw "$iface"); a1="${1:-0}"; b1="${2:-0}"
+	sleep "$SAMPLE"
+	set -- $(survey_raw "$iface"); a2="${1:-0}"; b2="${2:-0}"
+	da=$((a2 - a1)); db=$((b2 - b1))
+	if [ "$da" -gt 0 ]; then pct=$((db * 100 / da)); else pct=0; fi
+
+	echo "==================================================================="
+	printf "%-9s %-5s ch%-3s %-5s %s dBm\n" "$iface" "$band" "$ch" "$mode" "$txp"
+	printf "  信道占用率(busy) : %d%%   [active %dms / busy %dms / %ds]\n" "$pct" "$da" "$db" "$SAMPLE"
+	echo "  邻区(信号从强到弱):"
+	neigh "$iface" | sort -t "$(printf '\t')" -k2 -nr | awk -F '\t' '
+		{ printf "    ch%-4s %5s dBm   %s\n", $1, $2, ($3 == "" ? "(hidden)" : $3);
+		  n[$1]++; if ($2 + 0 < m[$1]) m[$1] = $2 + 0 }
+		END { printf "    -- 同信道 AP 数: "; for (c in n) printf "ch%s=%d ", c, n[c]; print "" }'
+	if [ -n "$(iwinfo "$iface" assoclist 2>/dev/null)" ]; then
+		echo "  已关联客户端:"
+		iw dev "$iface" station dump 2>/dev/null | awk '
+			/^Station/        { mac = $2 }
+			$1 == "signal:"    { s = $2 }
+			/tx bitrate:/     { tx = $3 " " $4 }
+			/rx bitrate:/     { rx = $3 " " $4 }
+			/tx retries:/     { rt = $3 }
+			/tx failed:/      { fl = $3 }
+			/connected time:/ { printf "    %s  rssi=%s dBm  tx=%s  rx=%s  retries=%s failed=%s\n", mac, s, tx, rx, rt, fl }'
+	fi
+done
+echo "==================================================================="

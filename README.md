@@ -25,7 +25,11 @@
 - 源码：`immortalwrt/immortalwrt` **发行版 tag `v25.12.2`**（openwrt-25.12 分支的发行点；feeds 按 commit 固定，可复现）
 - 机型：`CONFIG_TARGET_PROFILE="DEVICE_nradio_c8-668gl"`（上游已有该机型）
 - 默认 **中文界面**：`default-settings-chn` + `LUCI_LANG_zh_Hans` + `luci-i18n-base-zh-cn`，
-  并在 `files/` 里固定 `luci.main.lang=zh_cn`、时区 CST-8、国内 NTP、`filter_aaaa=1`（LAN 无 IPv6 上游）
+  并在 `files/` 里固定 `luci.main.lang=zh_cn`、时区 CST-8、国内 NTP；IPv6 走 odhcpd RA/NDP 中继
+  （`dhcp.{wan,lan}.{ra,dhcpv6,ndp}=relay` + `wan.master=1`），LAN 客户端直接使用上游 `2409:…/64`
+- **无线**：`files/` 首启固定 `country=CN`、2.4G `ch11/HE20`、5G `ch149/HE80`（实测环境最优）；
+  出厂 eeprom 的 wifi MAC 非法（驱动每次启动随机 BSSID），按 label MAC 派生固定 BSSID
+  （lan=label，wan=label+2，wifi 取 +1/+3）
 - 包集**只保留稳定组网所需**（275 包）：argon 主题、`luci-app-commands`/`ttyd`（维护用）、
   MT5700 工具链（`kmod-usb-serial-option`、`kmod-usb-net-cdc-ncm`、`usbutils`、`picocom`、
   `python3-light`+`python3-pyserial`）、风扇 `kmod-hwmon-pwmfan`、overlay `f2fs-tools`/`kmod-fs-f2fs`/`kmod-fs-ext4`
@@ -50,11 +54,13 @@
   3. 新版镜像已带 `f2fs-tools`+`kmod-fs-f2fs`：**全新安装**时（无 rootfs_data 分区）会自动用 6.5GB 的分区内 f2fs overlay，无需手工干预；若想在本机切到 6.5GB，执行 `fw_setenv bootargs`（清空）后重启即可。
 
 `files/` 覆盖：
-- `etc/uci-defaults/99-nradio-c8-defaults`：LAN `192.168.66.1`、hostname `C8`、时区 CST-8
+- `etc/uci-defaults/99-nradio-c8-defaults`：LAN `192.168.66.1`、hostname `C8`、时区 CST-8、
+  IPv6 RA/NDP 中继、无线（国家码/信道/固定 BSSID）
 - `etc/hotplug.d/usb/20-mt5700-serial`：把模块 5 个 `ff/06` 接口绑定到 usb-serial
 - `usr/bin/mt5700-at`：只读 AT 状态探针（`mt5700-at --json` / `--transport tcp` / `--raw "AT+CSQ"`）
 - `usr/bin/fanctl` + `etc/init.d/fancontrol` + `etc/config/fancontrol`：PWM 风扇温控（见下节）
 - `usr/bin/ledctl` + `etc/init.d/ledschedule` + `etc/config/ledschedule`：指示灯夜间定时熄灯（见下节）
+- `usr/bin/wifi-survey [秒]`：无线环境实测（信道占用率 + 邻区 + 客户端链路，判断频宽是否值得加宽）
 
 ## 风扇温控（userspace 兜底）
 
