@@ -4,7 +4,7 @@
 - 作者：Johnny（+ AI 协作）
 - 日期：2026-10-03
 - 关联：`docs/RFC-nradio-c8-native-firmware.md`（RFC-001）、`README.md` 的「风扇温控」「指示灯控制」两节
-- 施工对象：`nexw/Actions-OpenWrt`
+- 施工对象：`nexw/nradio-c8-mt5700-fw`（2026-10-03 由 `nexw/Actions-OpenWrt` 改名）
 
 ---
 

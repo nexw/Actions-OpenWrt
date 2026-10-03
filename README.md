@@ -1,4 +1,4 @@
-# Actions-OpenWrt — NRadio C8（WT9104 / C8-688）固件
+# nradio-c8-mt5700-fw — NRadio C8（WT9104 / C8-688）固件
 
 基于 [immortalwrt](https://github.com/immortalwrt/immortalwrt) 的 GitHub Actions 自动构建，
 目标设备 **NRadio C8**（ODM 板名 `WT9104`，SKU `C8-688`，UI 型号 `C8-668GL`）。
