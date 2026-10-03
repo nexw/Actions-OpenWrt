@@ -4,7 +4,7 @@
 - 作者：Johnny（+ AI 协作）
 - 日期：2026-10-01
 - 关联：`docs/refs/device-baseline.md`（实机基线）、`docs/refs/mt7981b-nradio-c8-668gl.immortalwrt.dts`、`docs/refs/platform.filogic.immortalwrt.sh`、`docs/refs/02_network.immortalwrt.sh`、`docs/refs/01_leds.immortalwrt.sh`、`docs/refs/emmc.sh`
-- 施工仓库：`nexw/Actions-OpenWrt`（当前是 P3TERX 模板 + Cudy TR3000 目标）
+- 施工仓库：`nexw/nradio-c8-mt5700-fw`（2026-10-03 由 `nexw/Actions-OpenWrt` 改名；仍是 P3TERX 模板 fork）
 
 ---
 
@@ -146,7 +146,7 @@
 | 级别 | 问题 | 实测结论 |
 |---|---|---|
 | P0 | `rm -rf /etc/apt/sources.list.d/*` 会删掉唯一的 apt 源 | **已证实**：24.04 上 `/etc/apt/sources.list` 只剩一句“sources have moved to …”的注释，真源在 `/etc/apt/sources.list.d/ubuntu.sources`（deb822）。旧写法会把它删掉。已改为 `find … ! -name 'ubuntu.sources' -delete`（22.04 行为等价，24.04 保留主源、只删 `microsoft-prod.list`） |
-| P0 | 列表里不存在的包会让 `apt-get -qq install` 返回 100 | **已排除**：65 个包在 24.04 上 `apt-cache show` 全部命中（missing=0），全量 `apt-get -s install` 也通过。原先担心的 `libncurses5-dev`/`libncursesw5-dev`/`antlr3`/`fastjar`/`upx-ucl`/`intltool`/`mkisofs`/`uglifyjs` 在 noble 里都存在，**不需要改名** |
+| P0 | 列表里不存在的包会让 `apt-get -qq install` 返回 100 | **已排除**：79 个包（官方 77 + 2）在 22.04/24.04 上逐个 `apt-get -s install` 全部可用（run 37105891296），全量 simulate 也通过。原先担心的 `libncurses5-dev`/`libncursesw5-dev`/`antlr3`/`fastjar`/`upx-ucl`/`intltool`/`mkisofs`/`uglifyjs` 在 noble 里都存在；虽然后来按官方清单把 ncurses 收敛成 `libncurses-dev`，但也验证过旧名可用 |
 | P1 | `python3-distutils` 自检能否过 | **已排除**：24.04 上 `python3 -c import distutils` → ok（setuptools 的 distutils shim 兜住了） |
 | P1 | 宿主工具链换代：gcc 11→13、binutils 2.38→2.42、glibc 2.35→2.39 | 仍未验证（探针不编译），只能靠一轮真构建 |
 | P2 | 镜像内容差异 / 磁盘 | **不需担心**：两边磁盘均 `87G avail`；`/opt/ghc`、`/usr/share/dotnet`、`CodeQL` 在 24.04 本就不存在，`rm -rf` 容错 |
@@ -157,23 +157,37 @@
 
 **单一来源**：新增 `.github/apt-deps.txt`（一行一个包，带分组注释）。
 `openwrt-builder.yml` 的 `Initialization environment` 与 `env-probe.yml` 都读它，
-不再把 71 个包名抄在 workflow 里。
+不再把 70+ 个包名抄在 workflow 里。解析方式是「去掉 `#` 注释 + 按空白切词」，
+所以文件里可以自由分组、写行内注释。
 
-**已剔除的包（71 → 65）**（逐条理由见 `apt-deps.txt` 末尾）：
+**清单来源（2026-10-03 改为对齐官方）**：不再以 P3TERX 模板的列表为基准，
+而以下面两份官方来源为准：
 
-| 包 | 剔除依据 |
-|---|---|
-| `python2.7` | 完整构建日志里 python2 只有 apt 安装记录、零次执行；仓库与 `.config` 均无引用（§5.1.2） |
-| `ack` | perl 版 grep，构建流程无引用（P3TERX 遗留） |
-| `lrzsz` | 串口 zmodem 传输，CI 无串口 |
-| `msmtp` | 发邮件；本 workflow 无邮件/通知步骤 |
-| `vim` | 交互式编辑器；要调试用 `main.yml` 的 tmate |
-| `qemu-utils` | `qemu-img` 只服务 x86 的 VHDX/VMDK；本目标是 mediatek/filogic |
+1. `immortalwrt/immortalwrt` `README.md` @ **v25.12.2**（本仓库 `BUILD_BRANCH` 所 pin 的 tag）
+   的 “Development > Requirements > Setup dependencies via APT”。
+2. `immortalwrt/build-scripts` 的 `init_build_environment.sh`（官方一键环境脚本，更权威）：
+   `apt install -y $BPO_FLAG ack antlr3 asciidoc … zlib1g-dev zstd xxd $VERSION_PACKAGE`，
+   再用版本化包安装 `gcc-$V` / `g++-$V` / `*-multilib`、`clang-$LLVM` / `lld-$LLVM` / `llvm-$LLVM`。
 
-**保留但存疑**（等下一轮构建日志裁决，不冒险）：`mkisofs`（同类理由但收益极小、
-失败点在镜像阶段很晚）、`upx-ucl`、`antlr3`、`fastjar`、`scons`、`intltool`、
-`asciidoc`、`xmlto`、`help2man`、`texinfo`、`subversion`、`swig`、`uglifyjs`、`p7zip*`。
-判据：这些都在上游通用依赖清单里，但本构建只面向单目标，是否真被引用需要实证。
+两份清单基本一致；脚本给 **noble 指定 `GCC_VERSION=13` / `LLVM_VERSION=18`**，
+而 ubuntu-24.04 的默认 gcc 就是 13、默认 clang/llvm 就是 18——**升到 24.04 反而与官方脚本
+的版本选择对齐**（22.04 默认 gcc 11 ≠ 脚本给 jammy 要的 gcc 10）。
+脚本中 `VERSION_PACKAGE`（python2）只给 bionic/buster/focal/bullseye/jammy 配，
+`noble` / `bookworm` / `trixie` 均为空——从官方侧再次印证 python2 不是必需品。
+
+**当前清单 = 官方 77 项 + 2 项 CI 附加**（`tar`：Debian essential，官方因此不写；
+`python3-setuptools`：24.04 起 distutils 移出 stdlib，靠它兜住
+`Checking 'python3-distutils'` 自检）。
+
+相对上一版（自 P3TERX 列表精简得到的 65 项）的调整：
+
+| 动作 | 包 | 依据 |
+|---|---|---|
+| **回补** | `ack` `lrzsz` `msmtp` `vim` `qemu-utils` | 上一轮按「CI 无交互 / 无串口 / 无邮件」删的，但官方清单里都有；以官方为准 |
+| **新增** | `clang` `lld` `llvm` `ecj` `gnutls-dev` `lib32gcc-s1` `libyaml-dev` `libz-dev` `re2c` `zstd` `nano` `python3-pip` `python3-ply` `python3-docutils` | 官方清单成员，上一版漏了 |
+| **改名** | `libncurses5-dev` + `libncursesw5-dev` → `libncurses-dev` | 官方的现代包名 |
+| **剔除** | `libev-dev` `libtirpc-dev` `liblzma-dev` `libfuse-dev` | 官方 README 与 init 脚本两处都没有；官方 CI 长期不用它们也能构建 |
+| 不动 | `python2.7` | 官方两处清单都没有（noble 的 `VERSION_PACKAGE` 为空），且已证实零使用 |
 
 **环境阶段流程优化**：
 
@@ -182,16 +196,17 @@
 | `rm -rf /etc/apt/sources.list.d/*`（在 24.04 会删掉主源） | `find … -type f ! -name 'ubuntu.sources' -delete`（22.04 行为等价，24.04 安全） |
 | 只清 `dotnet/android/ghc/CodeQL` | 追加 `boost /opt/az /opt/microsoft /usr/share/swift`（不存在则 `rm -rf` 容错） |
 | `apt-get update` 无重试 | 加 `-o Acquire::Retries=3` |
-| `apt-get install <71 个包>` 无防升级 | 加 `-y --no-upgrade`（不顺手升级 runner 既有包） |
+| `apt-get install <长列表>` 无防升级 | 加 `-y --no-upgrade`（不顺手升级 runner 既有包） |
 | 包名内联 | 读 `.github/apt-deps.txt`，并回显实际包数 |
 
 #### 5.1.4 验证记录（2026-10-03）
 
-**A. Env Probe 实跑** —— `env-probe.yml`，run 37094804605（由 PR #1 触发，2 个 job 各 ~20s）：
+**A. Env Probe 实跑**（`env-probe.yml`，手动 dispatch；每轮 2 个 job）：
 
 | 项 | ubuntu-22.04 | ubuntu-24.04 |
 |---|---|---|
-| `.github/apt-deps.txt` 65 个包 | 65/65 可用 | 65/65 可用（missing = 0） |
+| 旧清单 65 个包（run 37094804605） | 65/65 可用 | 65/65 可用 |
+| **官方 77 + 2 项 = 79 个包**（run **37105891296**） | **79/79 可用** | **79/79 可用** |
 | 全量 `apt-get -s install` | 通过 | 通过 |
 | `/etc/apt/sources.list` | 真源（`mirror+file:/etc/apt/apt-mirrors.txt`） | 只有“源已迁到 sources.list.d/ubuntu.sources”的注释 |
 | `sources.list.d/` | `microsoft-prod.list` | `microsoft-prod.list` + `ubuntu.sources` |
@@ -217,6 +232,23 @@
 | ~~dev-drprasad/delete-older-releases~~ | — | ~~node20~~ | 最新 v0.3.4 仍是 node20 ⇒ 换成官方 `gh release delete`（`keep_latest: 3` 语义保持，另加“只删 `YYYY.MM.DD-HHMM` 自动标签”的保险） |
 
 统一取「第一个 node24 的 major」而不是最新版，少跳几个 major、少引入行为变量。
+
+#### 5.1.5 runner 迁移到 ubuntu-24.04（2026-10-03）
+
+`.github/workflows/openwrt-builder.yml` 的 `runs-on` 已从 `ubuntu-22.04` 改为
+`ubuntu-24.04`。
+
+依据（§5.1.4 的探针实测）：65 个依赖 65/65 在 noble 可用、全量 `apt-get -s install`
+通过；deb822 源路径已适配（`! -name 'ubuntu.sources'`）；host python 为 3.12 且
+`distutils` 自检通过；磁盘同样 ~87G。
+
+**唯一未验证项**：宿主工具链换代（gcc 11→13、binutils 2.38→2.42、glibc 2.35→2.39）。
+本轮构建若失败在 host tool 编译阶段，优先怀疑这里，而不是包缺失。
+
+**回滚**：一行 —— `runs-on` 改回 `ubuntu-22.04`。其余改动（`.github/apt-deps.txt`、
+源路径写法、缓存、权限）在 22.04/24.04 上行为一致，不需要跟着回滚。
+
+`env-probe.yml` 保留 22.04/24.04 双矩阵：以后改动依赖清单时，先用它当 1 分钟探针。
 
 ### 5.2 补丁管理
 - 现状：`patch.tar.gz` / `patch2.tar.gz`（不透明）。

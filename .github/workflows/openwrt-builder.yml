@@ -39,7 +39,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04      # 固定版本便于复现；升 24.04 的真实阻塞点见 RFC §5.1.2（与 python2.7 无关）
+    runs-on: ubuntu-24.04      # 2026-10-03 从 22.04 升；依赖/源路径已由 env-probe 双跑核对，回滚只需改回 22.04（RFC §5.1.5）
     # 不写就是 6h 上限；失败重跑场景会白烧额度（RFC §5.1 对额度敏感）
     timeout-minutes: 300
 
@@ -76,7 +76,8 @@ jobs:
         sudo find /etc/apt/sources.list.d -maxdepth 1 -type f ! -name 'ubuntu.sources' -delete || true
 
         # ---- 3. 安装宿主依赖（清单单一来源：.github/apt-deps.txt）----
-        DEPS=$(grep -vE '^[[:space:]]*(#|$)' "$GITHUB_WORKSPACE/.github/apt-deps.txt" | tr '\n' ' ')
+        # 解析：去掉 `#` 注释、按空白切成词，允许行内注释与分组排版。
+        DEPS=$(sed 's/#.*//' "$GITHUB_WORKSPACE/.github/apt-deps.txt" | tr -s '[:space:]' '\n' | grep -vE '^$' | tr '\n' ' ')
         echo "apt 依赖清单：$(echo $DEPS | wc -w) 个包"
         sudo -E apt-get -qq update -o Acquire::Retries=3
         # --no-upgrade：不顺手升级 runner 上已有的包（少下载、少变量）
