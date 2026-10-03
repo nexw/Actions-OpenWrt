@@ -107,16 +107,16 @@ START-at-…977   SENDING-HUP-at-…979   WAIT-RETURNED-at-…979 rc=129
 ```
 packages/c8/fanctl/Makefile                              # PKGARCH:=all, DEPENDS:=+kmod-hwmon-pwmfan +kmod-gpio-pwm
 packages/c8/fanctl/LICENSE
-packages/c8/fanctl/root/usr/bin/fanctl                   # 由 files/ 迁入 + 加 SIGHUP 原地重载
-packages/c8/fanctl/root/etc/init.d/fancontrol            # 由 files/ 迁入 + service_triggers/reload_service
-packages/c8/fanctl/root/etc/config/fancontrol            # 由 files/ 迁入（conffile）
+packages/c8/fanctl/files/usr/bin/fanctl                   # 由 files/ 迁入 + 加 SIGHUP 原地重载
+packages/c8/fanctl/files/etc/init.d/fancontrol            # 由 files/ 迁入 + service_triggers/reload_service
+packages/c8/fanctl/files/etc/config/fancontrol            # 由 files/ 迁入（conffile）
 
 packages/c8/ledctl/Makefile                              # PKGARCH:=all, DEPENDS:=+kmod-leds-gpio +kmod-ledtrig-network
 packages/c8/ledctl/LICENSE
-packages/c8/ledctl/root/usr/bin/ledctl                   # 由 files/ 迁入 + 事件驱动 + SIGHUP 原地重载
-packages/c8/ledctl/root/etc/init.d/ledschedule           # 由 files/ 迁入 + service_triggers/reload_service
-packages/c8/ledctl/root/etc/config/ledschedule           # 由 files/ 迁入 + interval→max_sleep（conffile）
-packages/c8/ledctl/root/etc/hotplug.d/ntp/30-ledschedule # 新增：NTP 校时后 reload
+packages/c8/ledctl/files/usr/bin/ledctl                   # 由 files/ 迁入 + 事件驱动 + SIGHUP 原地重载
+packages/c8/ledctl/files/etc/init.d/ledschedule           # 由 files/ 迁入 + service_triggers/reload_service
+packages/c8/ledctl/files/etc/config/ledschedule           # 由 files/ 迁入 + interval→max_sleep（conffile）
+packages/c8/ledctl/files/etc/hotplug.d/ntp/30-ledschedule # 新增：NTP 校时后 reload
 ```
 
 feed 注册现在写在 workflow 的 `Load custom feeds` 步骤里（`src-link nrlocal
@@ -176,6 +176,9 @@ configuration` 步骤（原 `diy-part2.sh` 内联而来）里已有的「本地�
 | 守护进程 SIGHUP 处理不当导致进程被杀 | 中 | `trap` 必须在进入循环前设置；`reload_signal HUP` 只发给实例 pid |
 | 事件驱动漏掉边界（时钟跳变） | 中 | ntp 热插拔 hook + `max_sleep` 兜底（默认 1 h） |
 | 包化后路径/权限变化导致刷机后不可执行 | 低 | 用 `$(INSTALL_BIN)`（0755）；对照 RFC-001 已踩过的"files/ 可执行位丢失"坑 |
+| **纯文件包漏写 `define Build/Compile`** | **高（已发生）** | 实测 run `37092979877`：`fanctl` 挂在 world 末尾——`make[4]: *** No targets specified and no makefile found.`，因为 `include/package.mk:396` 默认 `Build/Compile=$(call Build/Compile/Default,)`＝`make -C $(PKG_BUILD_DIR)`，而空目录里没有 Makefile。**必须写空的 `define Build/Compile`**（同树正例 `package/emortal/cpufreq/Makefile`）。`Build/Install` 不用管：`package.mk:397` 是 `$(if $(PKG_INSTALL),…)`，本包未设 |
+| `PKGARCH:=all` 写在 Package 块外 | 中 | 块外会被 `include/package-defaults.mk` 里 `Package/Default` 的 `PKGARCH:=$(ARCH_PACKAGES)` 覆盖，包会变成目标架构相关（不失败但不符合本意）。树里 103 个包写在块内、只有 1 个写在外面，跟着多数写 |
+| 非 luci 包用 `root/` 当文件目录 | 低 | `root/` 是 `luci.mk` 的魔法目录名，非 luci 包里容易被误读（若将来引入 luci.mk 还会重复安装）。改用 OpenWrt 通用的 `files/`（树里 996 处） |
 | `/etc/config/*` 变 conffile 后与旧 overlay 内容冲突 | 低 | apk 保留本地修改；`interval` 残留已做向后兼容处理 |
 | 两个包与 `files/` 重复安装同一路径 | 低 | 本 RFC 已 `git mv`，`files/` 不再有副本 |
 

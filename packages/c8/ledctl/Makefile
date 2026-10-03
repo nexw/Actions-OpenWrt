@@ -21,9 +21,6 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=JohnnyLo <johnny@nexwy.me>
 
-# 纯 shell，目标无关
-PKGARCH:=all
-
 include $(INCLUDE_DIR)/package.mk
 
 define Package/ledctl
@@ -32,6 +29,10 @@ define Package/ledctl
   TITLE:=面板指示灯控制 / 夜间定时熄灯（NRadio C8，procd 托管）
   URL:=https://github.com/nexw/Actions-OpenWrt
   DEPENDS:=+kmod-leds-gpio +kmod-ledtrig-network
+  # 纯 shell，目标无关。必须写在 Package 块内：写在块外的全局 PKGARCH
+  # 会被 include/package-defaults.mk 里 Package/Default 的
+  # `PKGARCH:=$(ARCH_PACKAGES)` 覆盖掉。
+  PKGARCH:=all
 endef
 
 define Package/ledctl/description
@@ -52,12 +53,23 @@ define Package/ledctl/conffiles
 /etc/config/ledschedule
 endef
 
+# 纯文件包：没有源码、没有自己的 Makefile，必须屏蔽默认的 Build/Compile。
+# 否则会执行 include/package.mk:396 的
+#   Build/Compile = $(call Build/Compile/Default,)
+# 即 `make -C $(PKG_BUILD_DIR)`，而 $(PKG_BUILD_DIR) 是空目录，整包失败。
+# 同树正例：package/emortal/cpufreq/Makefile
+# 注：Build/Install 不用管 —— package.mk:397 是
+#   Build/Install = $(if $(PKG_INSTALL),$(call Build/Install/Default,))
+# 本包没设 PKG_INSTALL，所以它是空的。
+define Build/Compile
+endef
+
 define Package/ledctl/install
 	$(INSTALL_DIR) $(1)/usr/bin $(1)/etc/init.d $(1)/etc/config $(1)/etc/hotplug.d/ntp
-	$(INSTALL_BIN) ./root/usr/bin/ledctl $(1)/usr/bin/ledctl
-	$(INSTALL_BIN) ./root/etc/init.d/ledschedule $(1)/etc/init.d/ledschedule
-	$(INSTALL_CONF) ./root/etc/config/ledschedule $(1)/etc/config/ledschedule
-	$(INSTALL_BIN) ./root/etc/hotplug.d/ntp/30-ledschedule $(1)/etc/hotplug.d/ntp/30-ledschedule
+	$(INSTALL_BIN) ./files/usr/bin/ledctl $(1)/usr/bin/ledctl
+	$(INSTALL_BIN) ./files/etc/init.d/ledschedule $(1)/etc/init.d/ledschedule
+	$(INSTALL_CONF) ./files/etc/config/ledschedule $(1)/etc/config/ledschedule
+	$(INSTALL_BIN) ./files/etc/hotplug.d/ntp/30-ledschedule $(1)/etc/hotplug.d/ntp/30-ledschedule
 endef
 
 $(eval $(call BuildPackage,ledctl))

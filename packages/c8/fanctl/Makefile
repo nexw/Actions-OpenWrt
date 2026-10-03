@@ -22,9 +22,6 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=JohnnyLo <johnny@nexwy.me>
 
-# 纯 shell，目标无关
-PKGARCH:=all
-
 include $(INCLUDE_DIR)/package.mk
 
 define Package/fanctl
@@ -33,6 +30,10 @@ define Package/fanctl
   TITLE:=PWM 风扇温控（NRadio C8，userspace 兜底 + procd 托管）
   URL:=https://github.com/nexw/Actions-OpenWrt
   DEPENDS:=+kmod-hwmon-pwmfan +kmod-gpio-pwm
+  # 纯 shell，目标无关。必须写在 Package 块内：写在块外的全局 PKGARCH
+  # 会被 include/package-defaults.mk 里 Package/Default 的
+  # `PKGARCH:=$(ARCH_PACKAGES)` 覆盖掉（树里 103 个包都写在块内，只有 1 个写在外面）。
+  PKGARCH:=all
 endef
 
 define Package/fanctl/description
@@ -52,11 +53,25 @@ define Package/fanctl/conffiles
 /etc/config/fancontrol
 endef
 
+# 纯文件包：没有源码、没有自己的 Makefile，必须屏蔽默认的 Build/Compile。
+# 否则会执行 include/package.mk:396 的
+#   Build/Compile = $(call Build/Compile/Default,)
+# 即 `make -C $(PKG_BUILD_DIR)`，而 $(PKG_BUILD_DIR) 是空目录，报
+#   make[4]: *** No targets specified and no makefile found.  Stop.
+#   ERROR: package/feeds/nrlocal/fanctl failed to build.
+# 于 world 末尾整包失败（实测 2026-10-03 run 37092979877）。
+# 同树正例：package/emortal/cpufreq/Makefile
+# 注：Build/Install 不用管 —— package.mk:397 是
+#   Build/Install = $(if $(PKG_INSTALL),$(call Build/Install/Default,))
+# 本包没设 PKG_INSTALL，所以它是空的。
+define Build/Compile
+endef
+
 define Package/fanctl/install
 	$(INSTALL_DIR) $(1)/usr/bin $(1)/etc/init.d $(1)/etc/config
-	$(INSTALL_BIN) ./root/usr/bin/fanctl $(1)/usr/bin/fanctl
-	$(INSTALL_BIN) ./root/etc/init.d/fancontrol $(1)/etc/init.d/fancontrol
-	$(INSTALL_CONF) ./root/etc/config/fancontrol $(1)/etc/config/fancontrol
+	$(INSTALL_BIN) ./files/usr/bin/fanctl $(1)/usr/bin/fanctl
+	$(INSTALL_BIN) ./files/etc/init.d/fancontrol $(1)/etc/init.d/fancontrol
+	$(INSTALL_CONF) ./files/etc/config/fancontrol $(1)/etc/config/fancontrol
 endef
 
 $(eval $(call BuildPackage,fanctl))

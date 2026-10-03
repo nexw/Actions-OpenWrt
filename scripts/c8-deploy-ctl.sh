@@ -6,7 +6,7 @@
 #       包内容推到设备上；overlay 若在 sysupgrade 后丢了，重跑一次即可。
 #
 # 源目录（2026-10-03 起 fanctl / ledctl 已从 files/ 迁入 apk 包）：
-#   packages/c8/fanctl/root/...、packages/c8/ledctl/root/...
+#   packages/c8/fanctl/files/...、packages/c8/ledctl/files/...
 #   （files/ 现在只剩 mt5700-* 与 uci-defaults，与本脚本无关）
 #
 # 特点：
@@ -23,8 +23,8 @@ set -euo pipefail
 
 R="${1:-root@192.168.66.1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FANCTL="$ROOT/packages/c8/fanctl/root"
-LEDCTL="$ROOT/packages/c8/ledctl/root"
+FANCTL="$ROOT/packages/c8/fanctl/files"
+LEDCTL="$ROOT/packages/c8/ledctl/files"
 SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$R")
 SEC=main
 
