@@ -119,8 +119,9 @@ packages/c8/ledctl/root/etc/config/ledschedule           # 由 files/ 迁入 + i
 packages/c8/ledctl/root/etc/hotplug.d/ntp/30-ledschedule # 新增：NTP 校时后 reload
 ```
 
-feed 注册沿用 `diy-part1.sh` 的 `src-link nrlocal $GITHUB_WORKSPACE/packages`，`diy-part2.sh`
-里已有的「本地包是否真的就位」校验会自动覆盖新包（不用改脚本）。
+feed 注册沿用 `diy-part1.sh` 的 `src-link nrlocal $GITHUB_WORKSPACE/packages`；workflow
+的 `Load custom configuration` 步骤（2026-10-03 起由已删除的 `diy-part2.sh` 内联而来）里
+已有的「本地包是否真的就位」校验会自动覆盖新包，不用改脚本。
 
 ### 4.2 删除
 
@@ -140,7 +141,7 @@ feed 注册沿用 `diy-part1.sh` 的 `src-link nrlocal $GITHUB_WORKSPACE/package
 构建侧（不刷机即可验证）：
 
 1. `make defconfig` 后 `tmp/.config-package.in` 里出现 `config PACKAGE_fanctl` / `config PACKAGE_ledctl`；
-2. `ls package/feeds/nrlocal/` 能看到两个包（`diy-part2.sh` 的校验通过）；
+2. `ls package/feeds/nrlocal/` 能看到两个包（`Load custom configuration` 步骤的就位校验通过）；
 3. 产物中 `apk list --installed` 含 `fanctl`、`ledctl`，且 `/lib/apk/db/installed` 里能查到
    `/usr/bin/fanctl`、`/etc/init.d/fancontrol` 的属主。
 

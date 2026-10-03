@@ -17,7 +17,6 @@ env:
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -81,12 +80,71 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    - name: Load custom configuration
+    - name: Load custom configuration (files / .config / patches / local packages)
       run: |
+        # 说明：原先这里调用的 diy-part2.sh 已内联到本步骤（2026-10-03），
+        #       逻辑逐行等价，只是不再需要 chmod +x 和跨文件跳转。
+        #       默认 LAN IP / 主机名 / 时区统一交给 files/etc/uci-defaults/99-nradio-c8-defaults，
+        #       所以不需要在本步骤 sed config_generate。
+        OPENWRT="$GITHUB_WORKSPACE/openwrt"
         [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+        # ---- 1. 应用机型补丁（NRadio C8 / WT9104）----
+        # 补丁是 git 可 diff 的文本（见 docs/RFC-nradio-c8-native-firmware.md §5.2）。
+        # git apply 失败必须立即中断：不允许带着“半个补丁”往下跑 2.5 小时。
+        for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+          [ -e "$p" ] || continue
+          echo "applying $(basename "$p")"
+          git -C "$OPENWRT" apply --verbose "$p"
+        done
+        echo "--- 已应用补丁后的改动（预期只在 target/linux/mediatek 下）---"
+        git -C "$OPENWRT" diff --stat
+
+        # ---- 2. 确认本地包真的就位（早点报错，别等 2.5 小时）----
+        # diy-part1.sh 用 `src-link nrlocal $GITHUB_WORKSPACE/packages` 注册了 feed，
+        # feeds install 之后包应出现在 package/feeds/nrlocal/<name>（通常是指回
+        # $GITHUB_WORKSPACE/packages/<category>/<name> 的软链）。
+        for p in "$GITHUB_WORKSPACE"/packages/*/*/; do
+          [ -d "$p" ] || continue
+          name=$(basename "$p")
+          found=""
+          for cand in "$OPENWRT/package/feeds/nrlocal/$name" "$OPENWRT/package/$name"; do
+            [ -f "$cand/Makefile" ] && found=$cand && break
+          done
+          if [ -z "$found" ]; then
+            echo "错误：本地包 $name 没出现在 openwrt/package/{feeds/nrlocal/,} 下" >&2
+            ls -la "$OPENWRT/package/feeds/" 2>/dev/null | head >&2
+            exit 1
+          fi
+          echo "local package ok: $name -> ${found#$OPENWRT/}"
+        done
+
+        # ---- 3. 清包元数据 / 包目录缓存 ----
+        # .packagedirs 是「包目录文件列表」缓存；如果它是在本地包拷进来之前生成的，
+        # 扫描阶段就永远看不到我们的包（连一个警告都没有，症状就是 config 符号缺失）。
+        # 本地包是在上面 Update/Install feeds 阶段才进包的，本步骤紧接其后，
+        # 缓存很可能仍是 feeds 更新前那份 —— 所以这一步不能省。
+        # （实测踩过：luci-app-wtmodem / luci-app-cellscan 被 defconfig 静默丢掉。）
+        rm -f "$OPENWRT/tmp/.packageinfo" "$OPENWRT/tmp/.config-package.in" \
+              "$OPENWRT/tmp/.targetinfo" "$OPENWRT/tmp/.config-target.in" \
+              "$OPENWRT/tmp/.packagedirs" "$OPENWRT/tmp/.packagedirs.tmp" \
+              "$OPENWRT/tmp/.targetdirs" "$OPENWRT/tmp/.targetinfo.tmp"
+        echo "已清理 tmp/ 包元数据与包目录缓存（下次 make defconfig 会重新扫描）"
+
+        # ---- 4. files/ 卫生 ----
+        # `mv files openwrt/files` 会把目录里**所有**文件（含 .gitignore 掉的）一起带进
+        # rootfs。本地调试留下的 python 缓存会因此混进固件，清掉（纯增重，无用处）。
+        if [ -d "$OPENWRT/files" ]; then
+          n=$(find "$OPENWRT/files" -name '__pycache__' -type d -print 2>/dev/null | wc -l)
+          # *.pyc 只数 __pycache__ 之外的（目录内的跟着目录一起没了，别重复计数）
+          n=$((n + $(find "$OPENWRT/files" -name '*.pyc' -type f -not -path '*/__pycache__/*' -print 2>/dev/null | wc -l)))
+          if [ "$n" -gt 0 ]; then
+            find "$OPENWRT/files" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+            find "$OPENWRT/files" -name '*.pyc' -type f -delete 2>/dev/null || true
+            echo "已清掉 files/ 下 $n 项 python 缓存（__pycache__/*.pyc）"
+          fi
+        fi
 
     - name: Download package
       id: package

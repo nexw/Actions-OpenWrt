@@ -109,7 +109,7 @@
 
 ### 5.2 补丁管理
 - 现状：`patch.tar.gz` / `patch2.tar.gz`（不透明）。
-- 改为：`patches/` 目录下 git 可 diff 的补丁 + `diy-part2.sh` 里 `git apply`（或保留 tar 但改为 `tar` 内是文本补丁）。**这是我目前评审的第一步收益**：别人/未来的你能看到"改了什么"。
+- 改为：`patches/` 目录下 git 可 diff 的补丁 + workflow 的 `Load custom configuration` 步骤里 `git apply`（原 `diy-part2.sh` 已于 2026-10-03 内联进 workflow，见其文件头注释）。**这是我目前评审的第一步收益**：别人/未来的你能看到"改了什么"。
 
 ### 5.3 `.config`
 - `CONFIG_TARGET_mediatek_filogic_DEVICE_nradio_c8-668gl=y`（替换 `cudy_tr3000-256mb-v1`）
