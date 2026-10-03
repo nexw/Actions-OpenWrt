@@ -107,6 +107,82 @@
 - 备选：openwrt main（也有该机型），但 `platform.sh` 的 `CI_DATAPART` 等细节需另行核对；本机 DTS 与 immortalwrt 版差异更小。
 - 建议同时加：`actions/cache` 缓存 `ccache`，把每轮构建从 ~2.5h 压到 ~1h（Actions 免费额度 2000 min/月，构建轮次敏感）。
 
+#### 5.1.1 CI 环境加固（2026-10-03 落地）
+
+对 `openwrt-builder.yml` 环境面的评审结论与处置：
+
+| 项 | 评审发现 | 处置 |
+|---|---|---|
+| ccache 写回 | cache key 固定（`hashFiles('.config')`），而 `actions/cache` 条目不可变 → 命中后不再写回，ccache 自首次保存起停止增长 | key 追加 `github.run_id`，`restore-keys` 保留「精确 .config → 分支」两级前缀 |
+| `dl/` 缓存 | 每轮 `make download -j8` 重下 GB 级源码，是编译外最大固定开销 | 新增 dl 缓存；路径用真实路径 `/workdir/openwrt/dl`（工作区里的 `openwrt` 是软链，tar 不跟随） |
+| 编译重试 | `make -j$(nproc) \|\| make -j1 \|\| make -j1 V=s`，并行失败后串行续跑多数跑不完；撞 timeout 算 cancelled，`failure()` 不触发，日志留不下 | 单次 `make -j$(nproc)` + 子 shell 内 `set -o pipefail` + `tee $GITHUB_WORKSPACE/build.log`（openwrt 是软链，artifact 上传不跟软链）；新增失败时的 build-log artifact |
+| Release 清理 | `dev-drprasad/delete-older-releases` 缺 `env.GITHUB_TOKEN`（该 action 无默认值），失败又被 `continue-on-error` 吞掉 → 旧 Release 从未被清 | 补 `GITHUB_TOKEN`，pin 到 `v0.3.3` |
+| token 权限 | 无 `permissions:`，依赖仓库默认（收紧后 Release/清理才报错） | 显式 `contents: write` + `actions: write` |
+| 并发 / 超时 | 无 `concurrency`、无 `timeout-minutes`（默认 6h）；Release tag 为分钟精度，并发会抢同一 tag | `group: openwrt-builder`；`timeout-minutes: 300` |
+| action 版本 | `@main` / `@master` 可变 ref（checkout、upload-artifact、gh-release、两个清理 action） | pin 到 major tag：`@v4` / `@v2` / `Mattraks@v2` / `dev-drprasad@v0.3.3` |
+| 死变量 | `REPO_BRANCH`（clone 未带 `-b`，从未生效）、`FEEDS_CONF`（仓库根无此文件） | 删除；feeds 覆盖改为显式 `[ -f ]` 判断（原写法变量为空时 `mv` 只剩一个参数会失败） |
+| update-checker | 仍指向 `coolsnowwolf/lede`，且未限定 dispatch 事件类型 | 改为 immortalwrt master；builder 侧 `repository_dispatch: types: [Source Code Update]` |
+| 磁盘 | `Check space usage` 只在编译后打印 | 新增 `Pre-build environment check`（编译前 `df -hT` + `ccache -s` 留档） |
+
+评估过但未做：
+- **浅克隆**（`git clone --depth 1 --branch <tag>`）：省 1~2 min，但浅克隆对 OpenWrt 里 `git describe` 系脚本有历史报错记录，不值得拿 2.5h 构建验证。
+- **argon 主题 pin tag**（`luci-theme-argon` / `luci-app-argon-config` 仍 `--depth 1` 取默认分支，版本会漂移）：需联网确认 tag 名，留待后续。
+- **apt 源清理**（`rm -rf /etc/apt/sources.list.d/*`）：已在 §5.1.3 改为“只删非 `ubuntu.sources` 的文件”，两边都安全。
+
+#### 5.1.2 `runs-on` 的 pin 与 24.04 迁移评估（2026-10-03）
+
+先纠一个错：`python2.7` **不是** 24.04 的阻塞点。
+
+**python2.7 在本项目无任何实际依赖**（证据）：
+- 仓库内 `python2` / `py2` 只出现在 workflow 的 apt 安装行；`scripts/`、`patches/`、`packages/`、`files/` 无引用，`.config` 也无 `CONFIG_PACKAGE_python2*`。
+- `.config` 只产出目标端 python3（`Python-3.13.9`、`libpython3`、`python3-*`）。
+- 完整成功构建日志（`local/run-36901272322.log`）：`python2` 命中 17 行，**全部是 apt 安装记录，零次执行**；对照 `/usr/bin/python3.13` 出现 19 次。
+- immortalwrt master 的 host 依赖自检（同日志 1553–1587 行）要的是 **python3**：`Checking 'python'... updated`、`'python3'... updated`、`'python3-distutils'... ok`、`'python3-stdlib'... ok`，全程无 `Please install ...`。runner 上并没有 `/usr/bin/python`（未装 `python-is-python2`），说明 `python` 那项本身就是用 `python3` 候选命令跑通的。
+- 这一行是 P3TERX/lede 时代模板的遗留，删掉无成本。
+
+**换 24.04（noble）的真实问题**（按风险排序；未验证项需先在 24.04 runner 上 dry-run）：
+
+| 级别 | 问题 | 说明 |
+|---|---|---|
+| P0 | `rm -rf /etc/apt/sources.list.d/*` 会删掉唯一的 apt 源 | 22.04 主源在 `/etc/apt/sources.list`，删 `sources.list.d` 无碍；noble 默认改 deb822，主源在 `/etc/apt/sources.list.d/ubuntu.sources`、`sources.list` 为空 → 删完 `apt-get update` 直接挂。**未验证**（GitHub 24.04 镜像是否沿用 noble 默认形态待确认） |
+| P0 | apt 列表里不存在的包会让 `apt-get -qq install` 返回 100，整步中断 | 已确认 `python2.7` 不在 noble（无依赖，删即可）；`python3-distutils` 自 Python 3.12 起随 distutils 移除，很可能也没了（待确认 OpenWrt 的 `python3-distutils` 自检能否被 setuptools 的 distutils shim 兜住）。其余**未验证**候选：`libncurses5-dev`/`libncursesw5-dev`（noble 用 `libncurses-dev`）、`antlr3`、`fastjar`、`upx-ucl`、`intltool`、`mkisofs`、`uglifyjs` |
+| P1 | 宿主工具链换代：gcc 11→13、binutils 2.38→2.42、glibc 2.35→2.39 | 宿主工具用系统编译器编译，immortalwrt master 对新发行版一般可用，但只有真跑一轮才知道 |
+| P2 | 镜像内容差异 | `/opt/ghc`、`/usr/share/dotnet`、`/opt/hostedtoolcache/CodeQL` 本就不在 24.04 镜像里，`rm -rf` 容错；磁盘/CPU 档位相同 |
+
+**建议路径**（已实施）：`env-probe.yml`（只读探针，手动触发）跑 `ubuntu-22.04` / `ubuntu-24.04` 矩阵：打印 apt 源布局 + host python + 对 `.github/apt-deps.txt` 逐个 `apt-cache show` + 全量 `apt-get -s install`，1 分钟出“哪些包在 noble 不存在”。不要拿 2.5h 构建当探针。
+
+#### 5.1.3 APT 依赖收敛与环境阶段流程（2026-10-03 落地）
+
+**单一来源**：新增 `.github/apt-deps.txt`（一行一个包，带分组注释）。
+`openwrt-builder.yml` 的 `Initialization environment` 与 `env-probe.yml` 都读它，
+不再把 71 个包名抄在 workflow 里。
+
+**已剔除的包（71 → 65）**（逐条理由见 `apt-deps.txt` 末尾）：
+
+| 包 | 剔除依据 |
+|---|---|
+| `python2.7` | 完整构建日志里 python2 只有 apt 安装记录、零次执行；仓库与 `.config` 均无引用（§5.1.2） |
+| `ack` | perl 版 grep，构建流程无引用（P3TERX 遗留） |
+| `lrzsz` | 串口 zmodem 传输，CI 无串口 |
+| `msmtp` | 发邮件；本 workflow 无邮件/通知步骤 |
+| `vim` | 交互式编辑器；要调试用 `main.yml` 的 tmate |
+| `qemu-utils` | `qemu-img` 只服务 x86 的 VHDX/VMDK；本目标是 mediatek/filogic |
+
+**保留但存疑**（等下一轮构建日志裁决，不冒险）：`mkisofs`（同类理由但收益极小、
+失败点在镜像阶段很晚）、`upx-ucl`、`antlr3`、`fastjar`、`scons`、`intltool`、
+`asciidoc`、`xmlto`、`help2man`、`texinfo`、`subversion`、`swig`、`uglifyjs`、`p7zip*`。
+判据：这些都在上游通用依赖清单里，但本构建只面向单目标，是否真被引用需要实证。
+
+**环境阶段流程优化**：
+
+| 原状 | 现在 |
+|---|---|
+| `rm -rf /etc/apt/sources.list.d/*`（在 24.04 会删掉主源） | `find … -type f ! -name 'ubuntu.sources' -delete`（22.04 行为等价，24.04 安全） |
+| 只清 `dotnet/android/ghc/CodeQL` | 追加 `boost /opt/az /opt/microsoft /usr/share/swift`（不存在则 `rm -rf` 容错） |
+| `apt-get update` 无重试 | 加 `-o Acquire::Retries=3` |
+| `apt-get install <71 个包>` 无防升级 | 加 `-y --no-upgrade`（不顺手升级 runner 既有包） |
+| 包名内联 | 读 `.github/apt-deps.txt`，并回显实际包数 |
+
 ### 5.2 补丁管理
 - 现状：`patch.tar.gz` / `patch2.tar.gz`（不透明）。
 - 改为：`patches/` 目录下 git 可 diff 的补丁 + workflow 的 `Load custom configuration` 步骤里 `git apply`（原 `diy-part2.sh` 已于 2026-10-03 内联进 workflow，见其文件头注释）。**这是我目前评审的第一步收益**：别人/未来的你能看到"改了什么"。

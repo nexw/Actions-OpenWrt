@@ -1,0 +1,123 @@
+#
+# File: .github/workflows/env-probe.yml
+# Description: 只读探针 —— 核对 .github/apt-deps.txt 在 22.04 / 24.04 runner 上
+#
+# 目的：回答「把 openwrt-builder 从 ubuntu-22.04 升到 ubuntu-24.04 会缺什么」，
+#       用 1 分钟而不是一轮 2.5h 构建。
+#       同时打印 apt 源布局（22.04 的 sources.list vs 24.04 的 deb822
+#       sources.list.d/ubuntu.sources）与 host python 情况，用于确认
+#       builder 里「只删第三方源、保留 ubuntu.sources」的策略。
+# 不安装任何包、不构建。手动触发。
+#
+name: Env Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Runner layout (apt sources / python / disk)
+      run: |
+        {
+          echo "### $(. /etc/os-release; echo "$PRETTY_NAME")"
+          echo ""
+          echo '```'
+          echo "--- /etc/apt/sources.list ---"
+          cat /etc/apt/sources.list 2>/dev/null || echo "(不存在)"
+          echo "--- /etc/apt/sources.list.d/ ---"
+          ls -la /etc/apt/sources.list.d/ 2>/dev/null || true
+          for f in /etc/apt/sources.list.d/*; do
+            [ -f "$f" ] || continue
+            echo "== $f"; cat "$f"
+          done
+          echo "--- host python ---"
+          command -v python  || echo "(无 /usr/bin/python)"
+          python  --version 2>&1 || true
+          python3 --version 2>&1 || true
+          python3 -c 'import distutils; print("distutils: ok")' 2>&1 | tail -1
+          echo "--- disk ---"
+          df -hT /
+          echo '```'
+        } | tee runner-layout.txt
+
+    - name: apt-get update
+      run: sudo apt-get -qq update -o Acquire::Retries=3
+
+    - name: Check .github/apt-deps.txt availability
+      run: |
+        mkdir -p report
+        mapfile -t deps < <(grep -vE '^[[:space:]]*(#|$)' .github/apt-deps.txt)
+        : > report/missing.txt
+        ok=0
+        for p in "${deps[@]}"; do
+          if apt-cache show "$p" >/dev/null 2>&1; then
+            ok=$((ok+1))
+            echo "OK      $p" >> report/available.txt
+          else
+            echo "$p" >> report/missing.txt
+            echo "::warning title=apt 包不存在（${{ matrix.os }}）::$p"
+          fi
+        done
+        {
+          echo ""
+          echo "### apt 依赖可用性 @ ${{ matrix.os }}"
+          echo ""
+          echo "- 清单总数：${#deps[@]}"
+          echo "- 可用：$ok"
+          echo "- 缺失：$(wc -l < report/missing.txt)"
+          echo ""
+          if [ -s report/missing.txt ]; then
+            echo "| 缺失的包 |"
+            echo "|---|"
+            sed 's/^/| `/; s/$/` |/' report/missing.txt
+          else
+            echo "全部可用 ✅"
+          fi
+        } >> $GITHUB_STEP_SUMMARY
+        cat report/missing.txt || true
+
+    - name: Simulate the full install
+      if: always()
+      run: |
+        mkdir -p report
+        deps=$(grep -vE '^[[:space:]]*(#|$)' .github/apt-deps.txt | tr '\n' ' ')
+        if sudo apt-get -s install -y -o Acquire::Retries=3 $deps > report/simulate.txt 2>&1; then
+          echo "simulate 通过：将新增/升级 $(grep -c '^Inst ' report/simulate.txt) 个包"
+          tail -3 report/simulate.txt
+        else
+          echo "::error title=simulate 失败（${{ matrix.os }}）::见 artifact 里的 report/simulate.txt"
+          tail -30 report/simulate.txt
+          exit 1
+        fi
+        {
+          echo ""
+          echo "### 全量安装 simulate @ ${{ matrix.os }}"
+          echo ""
+          echo '```'
+          tail -3 report/simulate.txt
+          echo '```'
+        } >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: env-probe-${{ matrix.os }}
+        path: |
+          runner-layout.txt
+          report/
+        if-no-files-found: warn

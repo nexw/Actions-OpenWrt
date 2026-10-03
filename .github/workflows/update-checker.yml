@@ -12,14 +12,21 @@
 
 name: Update Checker
 
+# 注意：openwrt-builder 构建的是「pin 到 tag 的 immortalwrt」，本 checker 只看上游分支头，
+#       两者语义不同（分支头动了 !== tag 动了）。启用下面 schedule 前先想清楚是否保留它。
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
   REPO_BRANCH: master
 
 on:
   workflow_dispatch:
 #  schedule:
 #    - cron: 0 */18 * * *
+
+# repository_dispatch 需要 contents:write；删 workflow run 需要 actions:write。
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   check:
@@ -35,7 +42,7 @@ jobs:
 
     - name: Compare Commit Hash
       id: cacheHash
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: .commitHash
         key: commitHash_${{ steps.getHash.outputs.commitHash }}
