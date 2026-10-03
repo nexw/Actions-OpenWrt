@@ -39,7 +39,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04      # 固定版本便于复现；升 24.04 的真实阻塞点见 RFC §5.1.2（与 python2.7 无关）
+    runs-on: ubuntu-24.04      # 2026-10-03 从 22.04 升；依赖/源路径已由 env-probe 双跑核对，回滚只需改回 22.04（RFC §5.1.5）
     # 不写就是 6h 上限；失败重跑场景会白烧额度（RFC §5.1 对额度敏感）
     timeout-minutes: 300
 

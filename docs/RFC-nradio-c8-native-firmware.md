@@ -218,6 +218,23 @@
 
 统一取「第一个 node24 的 major」而不是最新版，少跳几个 major、少引入行为变量。
 
+#### 5.1.5 runner 迁移到 ubuntu-24.04（2026-10-03）
+
+`.github/workflows/openwrt-builder.yml` 的 `runs-on` 已从 `ubuntu-22.04` 改为
+`ubuntu-24.04`。
+
+依据（§5.1.4 的探针实测）：65 个依赖 65/65 在 noble 可用、全量 `apt-get -s install`
+通过；deb822 源路径已适配（`! -name 'ubuntu.sources'`）；host python 为 3.12 且
+`distutils` 自检通过；磁盘同样 ~87G。
+
+**唯一未验证项**：宿主工具链换代（gcc 11→13、binutils 2.38→2.42、glibc 2.35→2.39）。
+本轮构建若失败在 host tool 编译阶段，优先怀疑这里，而不是包缺失。
+
+**回滚**：一行 —— `runs-on` 改回 `ubuntu-22.04`。其余改动（`.github/apt-deps.txt`、
+源路径写法、缓存、权限）在 22.04/24.04 上行为一致，不需要跟着回滚。
+
+`env-probe.yml` 保留 22.04/24.04 双矩阵：以后改动依赖清单时，先用它当 1 分钟探针。
+
 ### 5.2 补丁管理
 - 现状：`patch.tar.gz` / `patch2.tar.gz`（不透明）。
 - 改为：`patches/` 目录下 git 可 diff 的补丁 + workflow 的 `Load custom configuration` 步骤里 `git apply`（原 `diy-part2.sh` 已于 2026-10-03 内联进 workflow，见其文件头注释）。**这是我目前评审的第一步收益**：别人/未来的你能看到"改了什么"。
