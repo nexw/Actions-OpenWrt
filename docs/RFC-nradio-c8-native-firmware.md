@@ -119,7 +119,7 @@
 | Release 清理 | `dev-drprasad/delete-older-releases` 缺 `env.GITHUB_TOKEN`（该 action 无默认值），失败又被 `continue-on-error` 吞掉 → 旧 Release 从未被清 | 补 `GITHUB_TOKEN`，pin 到 `v0.3.3` |
 | token 权限 | 无 `permissions:`，依赖仓库默认（收紧后 Release/清理才报错） | 显式 `contents: write` + `actions: write` |
 | 并发 / 超时 | 无 `concurrency`、无 `timeout-minutes`（默认 6h）；Release tag 为分钟精度，并发会抢同一 tag | `group: openwrt-builder`；`timeout-minutes: 300` |
-| action 版本 | `@main` / `@master` 可变 ref（checkout、upload-artifact、gh-release、两个清理 action） | pin 到 major tag：`@v4` / `@v2` / `Mattraks@v2` / `dev-drprasad@v0.3.3` |
+| action 版本 | `@main` / `@master` 可变 ref（checkout、upload-artifact、gh-release、两个清理 action） | 全部 pin 并升到 **node24** 运行时：checkout@v5、upload-artifact@v6、cache@v5、gh-release@v3、Mattraks@v2、repository-dispatch@v4；删旧 Release 改用官方 `gh release delete`，彻底去掉 `dev-drprasad` |
 | 死变量 | `REPO_BRANCH`（clone 未带 `-b`，从未生效）、`FEEDS_CONF`（仓库根无此文件） | 删除；feeds 覆盖改为显式 `[ -f ]` 判断（原写法变量为空时 `mv` 只剩一个参数会失败） |
 | update-checker | 仍指向 `coolsnowwolf/lede`，且未限定 dispatch 事件类型 | 改为 immortalwrt master；builder 侧 `repository_dispatch: types: [Source Code Update]` |
 | 磁盘 | `Check space usage` 只在编译后打印 | 新增 `Pre-build environment check`（编译前 `df -hT` + `ccache -s` 留档） |
@@ -137,17 +137,19 @@
 - 仓库内 `python2` / `py2` 只出现在 workflow 的 apt 安装行；`scripts/`、`patches/`、`packages/`、`files/` 无引用，`.config` 也无 `CONFIG_PACKAGE_python2*`。
 - `.config` 只产出目标端 python3（`Python-3.13.9`、`libpython3`、`python3-*`）。
 - 完整成功构建日志（`local/run-36901272322.log`）：`python2` 命中 17 行，**全部是 apt 安装记录，零次执行**；对照 `/usr/bin/python3.13` 出现 19 次。
-- immortalwrt master 的 host 依赖自检（同日志 1553–1587 行）要的是 **python3**：`Checking 'python'... updated`、`'python3'... updated`、`'python3-distutils'... ok`、`'python3-stdlib'... ok`，全程无 `Please install ...`。runner 上并没有 `/usr/bin/python`（未装 `python-is-python2`），说明 `python` 那项本身就是用 `python3` 候选命令跑通的。
+- immortalwrt master 的 host 依赖自检（同日志 1553–1587 行）要的是 **python3**：`Checking 'python'... updated`、`'python3'... updated`、`'python3-distutils'... ok`、`'python3-stdlib'... ok`，全程无 `Please install ...`。
+- **探针实拍**（`env-probe` 37094804605，`runner-layout.txt`）：两个 runner 上 `/usr/bin/python` 都存在且**都是 Python 3**（22.04 → 3.10.12，24.04 → 3.12.3）——`Checking 'python'` 那项拿到的本来就是 python3，与 `python2.7` 无关。
 - 这一行是 P3TERX/lede 时代模板的遗留，删掉无成本。
 
-**换 24.04（noble）的真实问题**（按风险排序；未验证项需先在 24.04 runner 上 dry-run）：
+**换 24.04（noble）的真实问题**（已由 `env-probe` 实测校正）：
 
-| 级别 | 问题 | 说明 |
+| 级别 | 问题 | 实测结论 |
 |---|---|---|
-| P0 | `rm -rf /etc/apt/sources.list.d/*` 会删掉唯一的 apt 源 | 22.04 主源在 `/etc/apt/sources.list`，删 `sources.list.d` 无碍；noble 默认改 deb822，主源在 `/etc/apt/sources.list.d/ubuntu.sources`、`sources.list` 为空 → 删完 `apt-get update` 直接挂。**未验证**（GitHub 24.04 镜像是否沿用 noble 默认形态待确认） |
-| P0 | apt 列表里不存在的包会让 `apt-get -qq install` 返回 100，整步中断 | 已确认 `python2.7` 不在 noble（无依赖，删即可）；`python3-distutils` 自 Python 3.12 起随 distutils 移除，很可能也没了（待确认 OpenWrt 的 `python3-distutils` 自检能否被 setuptools 的 distutils shim 兜住）。其余**未验证**候选：`libncurses5-dev`/`libncursesw5-dev`（noble 用 `libncurses-dev`）、`antlr3`、`fastjar`、`upx-ucl`、`intltool`、`mkisofs`、`uglifyjs` |
-| P1 | 宿主工具链换代：gcc 11→13、binutils 2.38→2.42、glibc 2.35→2.39 | 宿主工具用系统编译器编译，immortalwrt master 对新发行版一般可用，但只有真跑一轮才知道 |
-| P2 | 镜像内容差异 | `/opt/ghc`、`/usr/share/dotnet`、`/opt/hostedtoolcache/CodeQL` 本就不在 24.04 镜像里，`rm -rf` 容错；磁盘/CPU 档位相同 |
+| P0 | `rm -rf /etc/apt/sources.list.d/*` 会删掉唯一的 apt 源 | **已证实**：24.04 上 `/etc/apt/sources.list` 只剩一句“sources have moved to …”的注释，真源在 `/etc/apt/sources.list.d/ubuntu.sources`（deb822）。旧写法会把它删掉。已改为 `find … ! -name 'ubuntu.sources' -delete`（22.04 行为等价，24.04 保留主源、只删 `microsoft-prod.list`） |
+| P0 | 列表里不存在的包会让 `apt-get -qq install` 返回 100 | **已排除**：65 个包在 24.04 上 `apt-cache show` 全部命中（missing=0），全量 `apt-get -s install` 也通过。原先担心的 `libncurses5-dev`/`libncursesw5-dev`/`antlr3`/`fastjar`/`upx-ucl`/`intltool`/`mkisofs`/`uglifyjs` 在 noble 里都存在，**不需要改名** |
+| P1 | `python3-distutils` 自检能否过 | **已排除**：24.04 上 `python3 -c import distutils` → ok（setuptools 的 distutils shim 兜住了） |
+| P1 | 宿主工具链换代：gcc 11→13、binutils 2.38→2.42、glibc 2.35→2.39 | 仍未验证（探针不编译），只能靠一轮真构建 |
+| P2 | 镜像内容差异 / 磁盘 | **不需担心**：两边磁盘均 `87G avail`；`/opt/ghc`、`/usr/share/dotnet`、`CodeQL` 在 24.04 本就不存在，`rm -rf` 容错 |
 
 **建议路径**（已实施）：`env-probe.yml`（只读探针，手动触发）跑 `ubuntu-22.04` / `ubuntu-24.04` 矩阵：打印 apt 源布局 + host python + 对 `.github/apt-deps.txt` 逐个 `apt-cache show` + 全量 `apt-get -s install`，1 分钟出“哪些包在 noble 不存在”。不要拿 2.5h 构建当探针。
 
@@ -182,6 +184,39 @@
 | `apt-get update` 无重试 | 加 `-o Acquire::Retries=3` |
 | `apt-get install <71 个包>` 无防升级 | 加 `-y --no-upgrade`（不顺手升级 runner 既有包） |
 | 包名内联 | 读 `.github/apt-deps.txt`，并回显实际包数 |
+
+#### 5.1.4 验证记录（2026-10-03）
+
+**A. Env Probe 实跑** —— `env-probe.yml`，run 37094804605（由 PR #1 触发，2 个 job 各 ~20s）：
+
+| 项 | ubuntu-22.04 | ubuntu-24.04 |
+|---|---|---|
+| `.github/apt-deps.txt` 65 个包 | 65/65 可用 | 65/65 可用（missing = 0） |
+| 全量 `apt-get -s install` | 通过 | 通过 |
+| `/etc/apt/sources.list` | 真源（`mirror+file:/etc/apt/apt-mirrors.txt`） | 只有“源已迁到 sources.list.d/ubuntu.sources”的注释 |
+| `sources.list.d/` | `microsoft-prod.list` | `microsoft-prod.list` + `ubuntu.sources` |
+| `/usr/bin/python` | Python 3.10.12 | Python 3.12.3 |
+| `import distutils` | ok | ok |
+| 根分区可用 | 87G | 87G |
+
+结论：24.04 的**包层面障碍为零**，唯一的真障碍是 deb822 源路径（已修）。
+剩下的不确定项只有宿主工具链换代（gcc 13 / binutils 2.42 / glibc 2.39），需一轮真构建。
+
+**B. Action ref 审计** —— 逐个读 `action.yml` 的 `runs.using`，确认 pin 的 ref 都存在、
+且都落在 node24 上（GitHub 已强制 node20 action 跑在 node24，弃用警告就来自这个错配）：
+
+| action | pin | 运行时 | 备注 |
+|---|---|---|---|
+| actions/checkout | v5 | node24 | v4 是 node20；最新 v7 |
+| actions/upload-artifact | v6 | node24 | v5 仍是 node20；最新 v7 |
+| actions/cache | v5 | node24 | v4 是 node20；最新 v6 |
+| softprops/action-gh-release | v3 | node24 | v2 是 node20；`token` 输入默认 `github.token` |
+| Mattraks/delete-workflow-runs | v2 | node24 | 文件名是 `action.yaml` |
+| peter-evans/repository-dispatch | v4 | node24 | v2 是 node16 |
+| mxschmitt/action-tmate | v3 | node24 | 未改 |
+| ~~dev-drprasad/delete-older-releases~~ | — | ~~node20~~ | 最新 v0.3.4 仍是 node20 ⇒ 换成官方 `gh release delete`（`keep_latest: 3` 语义保持，另加“只删 `YYYY.MM.DD-HHMM` 自动标签”的保险） |
+
+统一取「第一个 node24 的 major」而不是最新版，少跳几个 major、少引入行为变量。
 
 ### 5.2 补丁管理
 - 现状：`patch.tar.gz` / `patch2.tar.gz`（不透明）。
