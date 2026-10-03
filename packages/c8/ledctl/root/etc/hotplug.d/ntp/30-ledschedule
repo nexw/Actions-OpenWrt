@@ -1,0 +1,17 @@
+#!/bin/sh
+#
+# 30-ledschedule — NTP 校时后让 ledschedule 重算时段边界
+#
+# 为什么需要这个钩子：
+#   ledctl daemon 是事件驱动的，它“睡到下一个时段边界”用的是绝对时间戳，
+#   而 sleep 走的是单调时钟。若 NTP 把墙上时间往回跳，正在睡的 wait 不会提前醒，
+#   理论上最多错过一个周期。procd 在时间首次可信（ACTION=stratum）时广播热插拔，
+#   这里把服务 reload 一次即可重算。
+#   同一目录的 25-dnsmasqsec 用的是完全相同的模式。
+#
+[ "$ACTION" = "stratum" ] || exit 0
+
+/etc/init.d/ledschedule enabled || exit 0
+
+logger -t ledschedule "NTP 校时完成，重算熄灯时段边界"
+/etc/init.d/ledschedule reload

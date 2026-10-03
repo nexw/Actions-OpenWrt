@@ -98,15 +98,18 @@ jobs:
         echo "--- 本地包安装位置（nrlocal feed）---"
         ls -d package/feeds/nrlocal/*/ 2>/dev/null | head -5 || true
         echo "--- Kconfig 里是否注册了符号（0 = 没注册）---"
-        for p in luci-app-wtmodem luci-app-cellscan; do
+        for p in luci-app-wtmodem luci-app-cellscan fanctl ledctl; do
           n=$(grep -c "config PACKAGE_$p$" tmp/.config-package.in 2>/dev/null || true)
           echo "  $p: ${n:-0}"
         done
         echo "==== 诊断结束 ===="
         # 快速失败：确认本仓库自带的本地包真的被 defconfig 选中了。
         # 否则要等 2.5 小时才在编译末尾报“找不到包/依赖缺失”，代价太大。
+        # 后半段是 fanctl/ledctl 的 DEPENDS：它们被选中就证明包内依赖声明真的生效了。
         missing=0
-        for p in luci-app-wtmodem luci-app-cellscan luci-compat luci-lua-runtime luci-lib-nixio; do
+        for p in luci-app-wtmodem luci-app-cellscan luci-compat luci-lua-runtime luci-lib-nixio \
+                 fanctl ledctl \
+                 kmod-hwmon-pwmfan kmod-gpio-pwm kmod-leds-gpio kmod-ledtrig-network; do
           if grep -q "^CONFIG_PACKAGE_$p=y" .config; then
             echo "  OK   CONFIG_PACKAGE_$p=y"
           else

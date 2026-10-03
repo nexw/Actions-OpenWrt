@@ -22,6 +22,16 @@
 #   ledctl schedule   只打印熄灯时段与下一次切换时间
 #   ledctl daemon     前台常驻（由 /etc/init.d/ledschedule 经 procd 拉起）
 #
+# 调度模型（v1.1 起，见 docs/RFC-002-led-fan-packaging.md）：
+#   **事件驱动，不做固定间隔轮询**。守护进程只在四种情况下醒来重算：
+#     ① 时段边界（off_start / off_end，支持跨零点）
+#     ② 手动覆盖到期（manual_hold）
+#     ③ 配置变更：uci commit → procd 触发器 → SIGHUP
+#     ④ 手动切灯：ledctl off/on/auto/toggle/blink 改完状态后显式 reload
+#   另外 /etc/hotplug.d/ntp/30-ledschedule 在 NTP 校时（时间跳变）后也会 reload。
+#   option max_sleep 是“最长休眠上限”（默认 3600s），纯粹为兜住时钟往回跳的情况；
+#   设为 0 即完全不限（纯事件驱动，此时正确性完全依赖 ntp 热插拔）。
+#
 # 注意：不要用 set -u —— /lib/functions.sh 里引用了未定义的 $IPKG_INSTROOT
 
 STATE=/var/run/ledschedule.state
@@ -30,7 +40,8 @@ STATE=/var/run/ledschedule.state
 ENABLED=1
 OFF_START=00:00
 OFF_END=06:00
-INTERVAL=60
+# 最长休眠上限（秒）：0 = 完全不限（纯事件驱动）；见文件头的调度模型
+MAX_SLEEP=3600
 MANUAL_HOLD=60
 AUTO_ETH_LEDS=1
 LED_SPECS="blue:power|1 blue:indicator-0| blue:indicator-1|0 blue:wlan|"
@@ -58,6 +69,7 @@ load_config() {
 	config_get OFF_START      main off_start      "$OFF_START"
 	config_get OFF_END        main off_end        "$OFF_END"
 	config_get INTERVAL       main interval       "$INTERVAL"
+	config_get MAX_SLEEP      main max_sleep      "$MAX_SLEEP"
 	config_get MANUAL_HOLD    main manual_hold    "$MANUAL_HOLD"
 	config_get_bool AUTO_ETH_LEDS main auto_eth_leds "$AUTO_ETH_LEDS"
 
@@ -68,6 +80,7 @@ load_config() {
 
 	# 避免 "08"/"09" 在 $(( )) 里被当八进制
 	INTERVAL=$(dec "$INTERVAL")
+	MAX_SLEEP=$(dec "$MAX_SLEEP")
 	MANUAL_HOLD=$(dec "$MANUAL_HOLD")
 }
 
@@ -226,6 +239,89 @@ hold_expiry() {
 	echo "$until"
 }
 
+# ---- 事件驱动调度：算“下一次该醒来的绝对时刻” ----
+
+# 今天 00:00 的 epoch。只用 date 的字段做减法，不依赖 date -d "YYYY-MM-DD HH:MM:SS"
+day_start() {
+	now=$(date +%s)
+	h=$(dec "$(date +%H)"); m=$(dec "$(date +%M)"); s=$(dec "$(date +%S)")
+	echo $(( now - (h * 3600 + m * 60 + s) ))
+}
+
+# 下一个时段边界（绝对 epoch）；时段无效时无输出
+next_boundary() {
+	# off_start == off_end 与 in_off_window 保持一致，视为未启用定时
+	[ -n "$OFF_START" ] && [ "$OFF_START" != "$OFF_END" ] || return 0
+	now=$1
+	d0=$(day_start)
+	best=
+	for b in "$OFF_START" "$OFF_END"; do
+		valid_hhmm "$b" || continue
+		t=$(( d0 + $(hhmm_to_min "$b") * 60 ))
+		[ "$t" -le "$now" ] && t=$(( t + 86400 ))
+		if [ -z "$best" ] || [ "$t" -lt "$best" ]; then best=$t; fi
+	done
+	[ -n "$best" ] && echo "$best"
+	return 0
+}
+
+# 下一次必须醒来的绝对 epoch = min(时段边界, 手动覆盖到期, 最长休眠上限)
+next_wake() {
+	now=$(date +%s)
+	wake=
+	if manual_active; then
+		u=$(state_get hold_until)
+		case "$u" in ''|*[!0-9]*) ;; *) wake=$u ;; esac
+	fi
+	if [ "$ENABLED" = "1" ]; then
+		b=$(next_boundary "$now")
+		if [ -n "$b" ]; then
+			if [ -z "$wake" ] || [ "$b" -lt "$wake" ]; then
+				wake=$b
+			fi
+		fi
+		# 最长休眠上限只在本服务启用时才需要：禁用时不动灯，没有“漏边界”风险
+		if [ "${MAX_SLEEP:-0}" -gt 0 ]; then
+			c=$(( now + MAX_SLEEP ))
+			if [ -z "$wake" ] || [ "$c" -lt "$wake" ]; then wake=$c; fi
+		fi
+	fi
+	[ -n "$wake" ] || wake=$(( now + 86400 ))
+	[ "$wake" -le "$now" ] && wake=$(( now + 1 ))
+	echo "$wake"
+}
+
+# 事件驱动休眠：sleep 放后台、前台只 wait。
+# busybox ash 的 trap 能立刻打断 wait；而直接 `sleep N` 必须睡满才执行 trap
+# （实机验证见 docs/RFC-002-led-fan-packaging.md §3.1）。
+sleep_until() {
+	target=$1
+	now=$(date +%s)
+	d=$(( target - now ))
+	[ "$d" -gt 0 ] || d=1
+	sleep "$d" &
+	_sleep_pid=$!
+	wait "$_sleep_pid"
+	_sleep_pid=
+	return 0
+}
+
+sleep_pid_kill() {
+	[ -n "$_sleep_pid" ] && kill "$_sleep_pid" 2>/dev/null
+	_sleep_pid=
+	return 0
+}
+
+# 手动切灯/状态变更后通知守护进程重算唤醒时刻。
+# 走 reload（procd_send_signal）而不是 restart：restart 会经 stop_service，
+# 夜里会“熄灯→亮一下→再熄灯”，且会清掉刚写的手动覆盖状态。
+sync_daemon() {
+	[ -x /etc/init.d/ledschedule ] || return 0
+	/etc/init.d/ledschedule running >/dev/null 2>&1 || return 0
+	/etc/init.d/ledschedule reload >/dev/null 2>&1
+	return 0
+}
+
 # ---- 输出 ----
 log() {
 	logger -t ledctl "$*" 2>/dev/null
@@ -246,8 +342,8 @@ cmd_status() {
 	build_led_list
 	printf '熄灯时段   : %s -> %s  (%s)\n' "$OFF_START" "$OFF_END" \
 		"$(in_off_window && echo '现在是关灯时段' || echo '现在是开灯时段')"
-	printf '服务开关   : %s   轮询 %ss   手动覆盖上限 %s 分钟\n' \
-		"$([ "$ENABLED" = 1 ] && echo enabled || echo disabled)" "$INTERVAL" "$MANUAL_HOLD"
+	printf '服务开关   : %s   最长休眠 %ss   手动覆盖上限 %s 分钟\n' \
+		"$([ "$ENABLED" = 1 ] && echo enabled || echo disabled)" "$MAX_SLEEP" "$MANUAL_HOLD"
 	m=$(state_get mode); [ -z "$m" ] && m=auto
 	if [ "$m" = manual ] && manual_active; then
 		printf '当前模式   : manual（手动覆盖中，%s 到期）\n' "$(date -d "@$(state_get hold_until)" '+%F %T' 2>/dev/null || echo "epoch $(state_get hold_until)")"
@@ -317,36 +413,54 @@ cmd_daemon() {
 		log "错误：没有找到任何可控制的 LED，退出"
 		return 1
 	fi
-	log "指示灯定时启动：$OFF_START-$OFF_END 关灯，轮询 ${INTERVAL}s，受控 $(echo $ALL_LEDS | wc -w) 个 LED"
 
-	last_mode= last_want=
+	# 旧配置迁移提示（v1.0 的 option interval 是轮询间隔，v1.1 起已废弃）
+	_legacy=$(uci -q get ledschedule.main.interval)
+	[ -n "$_legacy" ] && log "提示：ledschedule.main.interval='$_legacy' 已废弃（v1.1 起改为事件驱动），请改用 max_sleep（当前 ${MAX_SLEEP}s）"
+
+	# 见文件头“调度模型”：HUP = 原地重载；TERM/INT = 收尾退出（顺手收掉后台 sleep）
+	trap 'reload_wanted=1' HUP
+	trap 'sleep_pid_kill; exit 0' TERM INT
+	trap 'sleep_pid_kill' EXIT
+	reload_wanted=0
+
+	last_mode= last_want= manual_was=
+	log "指示灯定时启动（事件驱动）：$OFF_START-$OFF_END 关灯，最长休眠 ${MAX_SLEEP}s，受控 $(echo $ALL_LEDS | wc -w) 个 LED"
+
 	while :; do
-		# 每个 tick 重读一次配置：改完 uci 不用重启服务就生效
-		load_config
-		build_led_list
+		if [ "$reload_wanted" = "1" ]; then
+			# uci 变更 / 手动切灯 / NTP 校时都会到这里：重读配置与状态，并强制重新评估
+			reload_wanted=0
+			load_config
+			build_led_list
+			last_want=
+			log "已重载：$OFF_START-$OFF_END 关灯，最长休眠 ${MAX_SLEEP}s，受控 $(echo $ALL_LEDS | wc -w) 个 LED"
+		fi
+
 		if [ "$ENABLED" = "0" ]; then
 			[ "$last_want" != disabled ] && log "服务已禁用（uci: ledschedule.main.enabled=0），不干预 LED"
 			last_want=disabled
-			sleep "$INTERVAL"
-			continue
-		fi
-
-		if manual_active; then
-			[ "$last_mode" != manual ] && log "手动覆盖生效中，暂停自动切换"
-			last_mode=manual
+		elif manual_active; then
+			if [ "$manual_was" != 1 ]; then
+				log "手动覆盖生效中，暂停自动切换（$([ -n "$(state_get hold_until)" ] && date -d "@$(state_get hold_until)" '+%F %T' 2>/dev/null || echo "epoch $(state_get hold_until)") 到期）"
+				manual_was=1
+			fi
 		else
-			if [ "$last_mode" = manual ]; then
+			if [ "$manual_was" = 1 ]; then
 				log "手动覆盖结束，恢复自动切换"
 				state_set auto 0
+				manual_was=
 			fi
-			last_mode=auto
 			if in_off_window; then want=off; else want=on; fi
 			if [ "$want" != "$last_want" ]; then
 				cmd_apply "$want" auto
 				last_want=$want
 			fi
 		fi
-		sleep "$INTERVAL"
+
+		# 睡到下一个事件：时段边界 / 手动覆盖到期 / 最长休眠上限；
+		# HUP 会立刻打断这个 wait，不需要等待睡满。
+		sleep_until "$(next_wake)"
 	done
 }
 
@@ -354,16 +468,19 @@ load_config
 case "${1:-status}" in
 	status)   cmd_status ;;
 	schedule) cmd_schedule ;;
-	blink)    cmd_blink "${2:-}" "${3:-15}" ;;
+	blink)    cmd_blink "${2:-}" "${3:-15}"; sync_daemon ;;
 	daemon)   cmd_daemon ;;
-	off)      cmd_apply off manual; state_set manual "$(hold_expiry)" ;;
-	on)       cmd_apply on  manual; state_set manual "$(hold_expiry)" ;;
-	auto)     state_set auto 0; log "取消手动覆盖，回到自动"; cmd_apply "$(in_off_window && echo off || echo on)" auto ;;
+	# 内部命令：停服务时把灯按时段交还，但不再回头 reload 守护进程（此刻实例正在退出）
+	restore)  state_set auto 0; cmd_apply "$(in_off_window && echo off || echo on)" auto ;;
+	off)      cmd_apply off manual; state_set manual "$(hold_expiry)"; sync_daemon ;;
+	on)       cmd_apply on  manual; state_set manual "$(hold_expiry)"; sync_daemon ;;
+	auto)     state_set auto 0; log "取消手动覆盖，回到自动"; cmd_apply "$(in_off_window && echo off || echo on)" auto; sync_daemon ;;
 	toggle)   if [ "$(build_led_list; leds_state)" = off ]; then
 			cmd_apply on manual; state_set manual "$(hold_expiry)"
 		else
 			cmd_apply off manual; state_set manual "$(hold_expiry)"
-		fi ;;
+		fi
+		sync_daemon ;;
 	*)
 		cat >&2 <<-'EOF'
 		用法:
@@ -376,6 +493,7 @@ case "${1:-status}" in
 		  ledctl blink [led名] [秒数]
 		                   让某个（默认全部）LED 快速闪烁，用来识别面板灯
 		  ledctl daemon     前台常驻（procd 拉起）
+		  ledctl restore    内部命令：按时段重算状态（停服务时由 init 脚本调用）
 		EOF
 		exit 1
 		;;

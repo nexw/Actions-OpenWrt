@@ -2,13 +2,20 @@
 #
 # fanctl — NRadio C8 (WT9104 / C8-688) PWM 风扇温控（userspace 兜底实现）
 #
-# 背景：DTS 里已有 pwm-fan 节点（pwmchip0/pwm0，25 kHz），但现网镜像未带
-#       kmod-hwmon-pwmfan，且 cpu-thermal 的 cooling-maps 只绑了 WiFi，没绑风扇，
-#       所以内核温控不会驱动风扇。本脚本用 userspace 闭环补上这一段。
+# 背景：DTS 里已有 pwm-fan 节点（pwmchip0/pwm0，25 kHz），但 cpu-thermal 的
+#       cooling-maps 只绑了 WiFi、没绑风扇，所以内核 governor 不会驱动风扇。
+#       本脚本用 userspace 闭环补上这一段。
+#       注：25.12.2 起的镜像已经带了 kmod-hwmon-pwmfan（内建，lsmod 看不到是正常的），
+#       驱动会独占 pwm0 并默认停在 cooling-levels[0] = 50%；下面的 hwmon 通路
+#       就是为这个情况准备的（见 kernel_driver）。
 #
 # 若镜像带上了 pwmfan 驱动（/sys/class/hwmon/*/name == pwmfan），它会独占 pwm0。
 # 此时默认改走 hwmon 的 pwm1（0-255）继续控温（option kernel_driver='hwmon'）；
 # 若 DTS 给风扇绑了 cooling-map、想交回内核 governor，把该项设为 'yield' 即可。
+#
+# 配置生效（v1.1 起走 procd 触发器，见 docs/RFC-002-led-fan-packaging.md）：
+#   uci commit fancontrol → /etc/init.d/fancontrol reload → procd_send_signal
+#   → 本进程收到 SIGHUP → 原地重读 /etc/config/fancontrol（不重启、不断温控）。
 #
 # 用法：
 #   fanctl daemon        前台常驻温控循环（由 /etc/init.d/fancontrol 经 procd 拉起）
@@ -203,6 +210,23 @@ log() {
 	return 0
 }
 
+# 可被信号打断的 sleep：后台 sleep + 前台 wait。
+# busybox ash 直接 `sleep N` 时，trap 必须等睡满才执行；wait 会被信号立即打断。
+# 实机验证见 docs/RFC-002-led-fan-packaging.md §3.1。
+sleep_int() {
+	sleep "$1" &
+	_sleep_pid=$!
+	wait "$_sleep_pid"
+	_sleep_pid=
+	return 0
+}
+
+sleep_pid_kill() {
+	[ -n "$_sleep_pid" ] && kill "$_sleep_pid" 2>/dev/null
+	_sleep_pid=
+	return 0
+}
+
 cmd_status() {
 	resolve_pwm
 	hz=$(kernel_fan_hwmon) || hz=
@@ -265,7 +289,19 @@ cmd_daemon() {
 	cur=$(read_duty_pct)
 	log "温控启动 mode=$PWM_MODE interval=${INTERVAL}s min=${MIN_DUTY}% max=${MAX_DUTY}% 起始=${cur}%"
 
+	# HUP：uci 变更（procd 触发器）→ 原地重读配置，不重启进程、不断温控
+	# TERM/INT：收掉后台 sleep 子进程后退出，避免留下孤儿
+	trap 'reload_wanted=1' HUP
+	trap 'sleep_pid_kill; exit 0' TERM INT
+	trap 'sleep_pid_kill' EXIT
+	reload_wanted=0
+
 	while :; do
+		if [ "$reload_wanted" = "1" ]; then
+			reload_wanted=0
+			load_config
+			log "配置已重载：interval=${INTERVAL}s min=${MIN_DUTY}% max=${MAX_DUTY}% hysteresis=${HYSTERESIS} down_step=${DOWN_STEP} force_max=${FORCE_MAX_TEMP}"
+		fi
 		# 每个 tick 重解析：内核 pwmfan 驱动可能中途上线/下线
 		resolve_pwm
 		case "$PWM_MODE" in
@@ -309,7 +345,7 @@ cmd_daemon() {
 			fi
 		fi
 		echo "temp=${t:-na}md duty=${cur}%" > "$STATE" 2>/dev/null
-		sleep "$INTERVAL"
+		sleep_int "$INTERVAL"
 	done
 }
 

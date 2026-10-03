@@ -58,16 +58,35 @@
   IPv6 RA/NDP 中继、无线（国家码/信道/固定 BSSID）
 - `etc/hotplug.d/usb/20-mt5700-serial`：把模块 5 个 `ff/06` 接口绑定到 usb-serial
 - `usr/bin/mt5700-at`：只读 AT 状态探针（`mt5700-at --json` / `--transport tcp` / `--raw "AT+CSQ"`）
-- `usr/bin/fanctl` + `etc/init.d/fancontrol` + `etc/config/fancontrol`：PWM 风扇温控（见下节）
-- `usr/bin/ledctl` + `etc/init.d/ledschedule` + `etc/config/ledschedule`：指示灯夜间定时熄灯（见下节）
 - `usr/bin/wifi-survey [秒]`：无线环境实测（信道占用率 + 邻区 + 客户端链路，判断频宽是否值得加宽）
+- `etc/config/commands`：LuCI「系统 → 命令」的快捷命令（5G / 风扇 / LED / 短信）
+
+本地 apk 包（`packages/`，经 `src-link nrlocal` 进 feeds；**不再放 `files/`**，设计见
+`docs/RFC-002-led-fan-packaging.md`）：
+
+| 包 | 内容 | 依赖 |
+|---|---|---|
+| `packages/luci/luci-app-wtmodem` | 蜂窝面板 | `+luci-compat +luci-lib-nixio` |
+| `packages/luci/luci-app-cellscan` | 邻区扫描 | `+luci-compat` |
+| `packages/c8/fanctl` | `usr/bin/fanctl` + `etc/init.d/fancontrol` + `etc/config/fancontrol` | `+kmod-hwmon-pwmfan +kmod-gpio-pwm` |
+| `packages/c8/ledctl` | `usr/bin/ledctl` + `etc/init.d/ledschedule` + `etc/config/ledschedule` + `etc/hotplug.d/ntp/30-ledschedule` | `+kmod-leds-gpio +kmod-ledtrig-network` |
+
+> 为什么必须做成包：`files/` 里的内容不被 apk 记账（实机 `apk info -W /usr/bin/fanctl`
+> → `Could not find owner package`），没有版本、无法单独升级、无法声明依赖；
+> `/etc/config/*` 也只有做成包的 conffile 才有正确的升级语义。
 
 ## 风扇温控（userspace 兜底）
 
-DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但**现网镜像没有真正带上驱动**：
-`.config` 虽然选了 `kmod-hwmon-pwmfan`，实机却查不到 `pwmfan` hwmon（`/lib/modules` 里既无
-`pwm-fan.ko` 也不是 builtin），且 `cpu-thermal` 的 `cooling-maps` 只绑了 WiFi/未绑风扇，
-内核 governor 不会驱动风扇。为不阻塞使用，仓库用 userspace 闭环补上这一段：
+DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但 `cpu-thermal` 的 `cooling-maps`
+只绑了 WiFi、没绑风扇，**内核 governor 不会驱动风扇**。为不阻塞使用，仓库用 userspace
+闭环补上这一段：
+
+> ✅ **2026-10-03 实机复核（更正早期说法）**：25.12.2 起的镜像**确实带了**
+> `kmod-hwmon-pwmfan`（**builtin**，`lsmod` 里看不到是正常现象）。实机
+> `hwmon3: pwmfan` 在线，`fanctl status` 报 `mode: hwmon-pwmfan`、
+> `pwm1 = 170/255 = 66% @ 73.0 ℃`。内核驱动会独占 `pwm0` 并默认停在
+> `cooling-levels[0] = 50%`，所以**必须走 `hwmon` 通路** —— `kernel_driver`
+> 的默认值 `hwmon` 正是为此而设，不要想当然改成直接写 `pwm0`。
 
 - `usr/bin/fanctl`：读 `thermal_zone0` → 查曲线（线性插值）→ 写 PWM。
   带 **3 ℃ 迟滞**、单次最多降 **10%**（抑制转速突变啸叫）、**>95 ℃ 直接拉满**、
@@ -84,8 +103,12 @@ DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但**现网镜像
   > 死锁在内核初始化的 50%。只有将来给风扇绑了 cooling-map，才应该把
   > `kernel_driver` 改成 `yield`。
 - `etc/init.d/fancontrol`：procd 托管（退出后 5 s 重启，1 h 内最多 5 次），`START=96`
-  （在 95 的 `fanfallback` 之后接管）。
-- `etc/config/fancontrol`：间隔、曲线、下限/上限、迟滞、降幅、硬阈值均可调。
+  （在 95 的 `fanfallback` 之后接管）；带 `service_triggers()` + 实例级
+  `reload_signal=HUP`，所以 `uci commit fancontrol` 会**原地重载**配置（进程不重启、
+  温控不中断）。改造前是“改完必须手动 `/etc/init.d/fancontrol restart`”。
+- `etc/config/fancontrol`：间隔、曲线、下限/上限、迟滞、降幅、硬阈值均可调；它是本包的
+  **conffile**，升级时保留本地修改。
+- 包依赖 `+kmod-hwmon-pwmfan +kmod-gpio-pwm` 由 `DEPENDS` 自动拉入（原来靠手写 `.config`）。
 
 默认温度-转速曲线（实机实测：原先只有开机 50% 兜底时空载 ~77 ℃；启用本曲线后空载
 稳定在 ~71–72 ℃、对应 68% 左右，余量留给 85 ℃ 以上）：
@@ -101,8 +124,9 @@ fanctl status     # 模式 / CPU 温度 / 当前占空比 / 风扇供电 / 目�
 fanctl curve      # 查看生效曲线
 fanctl set 80     # 手动打到 80%（下一个温控循环会按曲线纠正）
 fanctl auto       # 立刻交回自动温控（按当前温度设一次，之后由守护进程接管）
+# 改配置：commit 即生效（procd 触发器 → SIGHUP → 原地重载），不再需要 restart
 uci set fancontrol.main.interval='5' && uci commit fancontrol
-/etc/init.d/fancontrol restart
+logread -e fanctl        # 应看到 "配置已重载：interval=5s ..."
 ```
 
 LuCI 里也预置了三个「风扇」快捷命令（`luci-app-commands` → 系统 → 命令）。
@@ -119,7 +143,7 @@ LuCI 里也预置了三个「风扇」快捷命令（`luci-app-commands` → 系
 
 | LED | sysfs | 引脚 | 平时由谁点亮 | 可控 |
 |---|---|---|---|---|
-| 电源/状态 | `blue:power` | pio10 | **只在开机时由 `/etc/diag.sh` → `set_state done` 点亮一次**，之后无人管理 | ✅ |
+| 电源/状态 | `blue:power` | pio10 | 开机时由 `/etc/diag.sh` → `set_state done` 点一次；之后由 `led_power`（`default-on`）接管 | ✅ |
 | 组网模式 5 / 5G | `blue:indicator-0` | pio11 | `led_5g`（netdev 跟随 `eth1`） | ✅ |
 | 组网模式 4 | `blue:indicator-1` | pio12 | 无（保持熄灭） | ✅ |
 | WiFi | `blue:wlan` | pio34 | `led_wifi`（netdev 跟随 `phy1-ap0`） | ✅ |
@@ -132,20 +156,38 @@ LuCI 里也预置了三个「风扇」快捷命令（`luci-app-commands` → 系
 2. 开机：DT aliases 把 `led-boot`/`led-failsafe`/`led-running`/`led-upgrade` **全部指向 `&led_power`**，
    `/etc/init.d/done`(START=95) 调 `. /etc/diag.sh; set_state done`：先 `status_led_off`，
    再因为 `boot == running` 跳过 trigger 还原、直接 `status_led_on` → `trigger=none, brightness=1`。
-3. 之后：`/etc/config/system` 里 **没有** `blue:power` 的 led 段（`uci show system` 里 0 条），
-   内核 `trigger=none`，`/etc/init.d/led start` 也不会碰它 —— **它是「开机点一次就不再变」的静态灯**，
-   被夜里关掉后也不会自己恢复（diag 只在开机跑）。
-4. 现在：只有 `ledctl`/`ledschedule` 会在 00:00–06:00 关它、到点再点亮，以及手动 `ledctl on/off`。
+3. 之后：内核 `trigger=none`，**它是「开机点一次就不再变」的静态灯**，被夜里关掉后
+   也不会自己恢复（`diag` 只在开机跑）。
+   > ⚠️ **2026-10-03 更正**：早期文档写「`/etc/config/system` 里 **没有** `blue:power` 的
+   > led 段（`uci show system` 里 0 条）」已经过时 —— 实机现在有
+   > `system.@led[2].sysfs='blue:power'` / `trigger='default-on'`，`ledctl status` 也报
+   > `恢复来源=uci`。该段原本是设备端手工加的，现已固化进
+   > `files/etc/uci-defaults/99-nradio-c8-defaults`（新装机自动生成 `system.led_power`，
+   > 已有同名声明则跳过），所以 `/etc/init.d/led start` 也会重建它。
+4. 现在：`ledctl`/`ledschedule` 会在 00:00–06:00 关它、到点再点亮，以及手动 `ledctl on/off`。
 
-把 `blue:power` 纳入 `ledschedule.main.leds` 正是为了补上第 3 条的缺口。
+`ledschedule.main.leds` 里把 `blue:power` 写成 `blue:power|1`（带显式恢复亮度），
+即使第 3 条那条 UCI 段丢了也能正确点亮 —— 这就是「`|亮度` 用于 `/etc/config/system`
+未声明的灯」那个设计的兜底用途。
 
 - `usr/bin/ledctl`：关灯时逐灯 `trigger=none` + `brightness=0`；开灯时**先让
   `/etc/init.d/led start` 按 `/etc/config/system` 重建 netdev 灯，再按熄灯前快照还原
   其余灯的 trigger/device_name**，所以开灯后与熄灯前完全一致（已实测往返一致）。
-- `etc/init.d/ledschedule`：procd 托管，`START=97`（在 `led`(96) 之后），**每 60 s 轮询**
-  而不用 cron——这样开机时刻、NTP 校时跳变、跨零点时段都能正确兜底。
-- `etc/config/ledschedule`：时段、轮询间隔、手动覆盖时长、受控 LED 列表均可调；
-  守护进程每个 tick 重读一次 uci，改完配置无需重启服务即可生效。
+- `etc/init.d/ledschedule`：procd 托管，`START=97`（在 `led`(96) 之后）；带
+  `service_triggers()` + 实例级 `reload_signal=HUP`。
+- **事件驱动，不做固定间隔轮询**（v1.1 起，见 `docs/RFC-002-led-fan-packaging.md`）。
+  守护进程只在四种情况下醒来重算：① 时段边界（支持跨零点）② 手动覆盖到期
+  ③ 配置变更（`uci commit` → procd 触发器 → SIGHUP）④ 手动切灯
+  （`ledctl off/on/auto/blink` 改完状态后显式 reload）。另外
+  `etc/hotplug.d/ntp/30-ledschedule` 在 NTP 校时（时间跳变）后也会 reload。
+  **不用 cron 也不用轮询**：原来那个 60 s 轮询是为了兜住“开机时刻 / NTP 跳变 /
+  跨零点”，现在这三件事分别由“启动即评估 / ntp 热插拔 / 跨零点算术”直接解决。
+  > 唯一例外是 `option max_sleep`（默认 3600 s）：`sleep` 走单调时钟，NTP 把墙上
+  > 时间往回跳时最多晚一个上限才发现。设 `0` 即完全不限（纯事件驱动）。这是有意的
+  > 取舍，不把时段正确性完全押在单一外部事件上。
+- `etc/config/ledschedule`：时段、`max_sleep`、手动覆盖时长、受控 LED 列表均可调；
+  改完 `uci commit` 即时生效（无需重启服务）。`option interval`（轮询间隔）已废弃，
+  残留时守护进程会在日志里提示一次。
 
 ```sh
 ledctl status      # 时段 / 模式 / 每个 LED 的 trigger、brightness、恢复来源
@@ -155,6 +197,10 @@ ledctl on          # 立刻开灯（手动覆盖）
 ledctl auto        # 取消手动覆盖，立即按时段执行
 ledctl toggle
 ledctl blink blue:power 20   # 让某颗灯闪 20 s，用来辨认面板上到底是哪一颗
+
+# 改配置：commit 即生效（触发器原地重载，不用等下一个轮询周期）
+uci set ledschedule.main.off_start='22:30' && uci commit ledschedule
+logread -e ledctl            # 应看到 "已重载：22:30-07:00 关灯 ..."
 ```
 
 手动覆盖不会一直卡住：到期时间 = `min(现在 + manual_hold 分钟, 下一个时段边界)`，

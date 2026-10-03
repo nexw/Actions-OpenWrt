@@ -4,8 +4,12 @@ config ledschedule 'main'
 	# 关灯时段（本地时间 HH:MM，支持跨零点，如 22:30 -> 07:00）
 	option off_start '00:00'
 	option off_end '06:00'
-	# 轮询间隔（秒）：兜底 NTP 校时跳变、开机时刻、时段边界
-	option interval '60'
+	# 最长休眠上限（秒）。守护进程是事件驱动的，只在「时段边界 / 手动覆盖到期 /
+	# 配置变更 / NTP 校时」醒来；本项纯粹是兜底：sleep 走单调时钟，若 NTP 把墙上
+	# 时间往回跳，最多晚一个上限才发现。0 = 完全不限（纯事件驱动，正确性完全依赖
+	# /etc/hotplug.d/ntp/30-ledschedule）。
+	# 注：v1.0 的 option interval（固定轮询间隔）已废弃，改用本项。
+	option max_sleep '3600'
 	# 手动 `ledctl on/off` 的最长保持时间（分钟）；0 = 一直保持到下一个时段边界
 	option manual_hold '60'
 	# 自动探测网口(RJ45)灯：当前 MT7531 固件无软件通路，默认为空操作，
@@ -17,6 +21,10 @@ config ledschedule 'main'
 	#   不带 |    -> 「开灯」时交给 /etc/init.d/led start 按 /etc/config/system 重建
 	#               （netdev 这类需要 device_name/mode 的复杂 trigger 走这条）
 	# 关灯前的 trigger/device_name 会快照到 /var/run/ledschedule.leds，开灯时精确还原。
+	#
+	# blue:power 已在 files/etc/uci-defaults/99-nradio-c8-defaults 里声明为
+	# trigger=default-on（因此“开灯”时也会被 /etc/init.d/led start 重建）；这里仍
+	# 写成 blue:power|1 作为兜底，即使将来那条 UCI 段丢失也能正确点亮。
 	list leds 'blue:power|1'
 	list leds 'blue:indicator-0'
 	list leds 'blue:indicator-1|0'

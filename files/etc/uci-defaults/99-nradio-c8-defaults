@@ -78,4 +78,20 @@ if [ -n "$(uci -q get wireless.radio0.band)" ] && [ -n "$(uci -q get wireless.ra
 	uci -q commit wireless
 fi
 
+# ---- 指示灯 ----
+# blue:power 是“开机点一次就不再变”的静态灯：厂商 DT 把 led-boot/led-failsafe/
+# led-running/led-upgrade 全指向它，/etc/init.d/done 只调 set_state 点亮一次。
+# 这里显式声明为 default-on，让 /etc/init.d/led start 也能重建它（ledctl 的“开灯”
+# 会调它），并让 ledctl status 的“恢复来源”显示为 uci。
+# 已有同名声明就跳过（例如设备上手工加过 blue:power 的 led 段）。
+if ! uci -q show system 2>/dev/null | grep -q "\.sysfs='blue:power'$"; then
+	uci -q batch <<-EOF
+		set system.led_power=led
+		set system.led_power.name='power'
+		set system.led_power.sysfs='blue:power'
+		set system.led_power.trigger='default-on'
+	EOF
+	uci -q commit system
+fi
+
 exit 0

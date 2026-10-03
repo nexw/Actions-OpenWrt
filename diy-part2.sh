@@ -51,4 +51,17 @@ rm -f "$OPENWRT/tmp/.packageinfo" "$OPENWRT/tmp/.config-package.in" \
       "$OPENWRT/tmp/.targetdirs" "$OPENWRT/tmp/.targetinfo.tmp"
 echo "已清理 tmp/ 包元数据与包目录缓存（下次 make defconfig 会重新扫描）"
 
+# ---- 4. files/ 卫生 ----
+# `mv files openwrt/files` 会把目录里**所有**文件（含 .gitignore 掉的）一起带进 rootfs。
+# 本地调试留下的 python 缓存会因此混进固件，清掉（纯增重，无用处）。
+if [ -d "$OPENWRT/files" ]; then
+    n=$(find "$OPENWRT/files" -name '__pycache__' -type d -print 2>/dev/null | wc -l)
+    n=$((n + $(find "$OPENWRT/files" -name '*.pyc' -type f -print 2>/dev/null | wc -l)))
+    if [ "$n" -gt 0 ]; then
+        find "$OPENWRT/files" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+        find "$OPENWRT/files" -name '*.pyc' -type f -delete 2>/dev/null || true
+        echo "已清掉 files/ 下 $n 项 python 缓存（__pycache__/*.pyc）"
+    fi
+fi
+
 echo "diy-part2 done"
