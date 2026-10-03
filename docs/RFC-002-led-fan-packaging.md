@@ -119,9 +119,10 @@ packages/c8/ledctl/root/etc/config/ledschedule           # 由 files/ 迁入 + i
 packages/c8/ledctl/root/etc/hotplug.d/ntp/30-ledschedule # 新增：NTP 校时后 reload
 ```
 
-feed 注册沿用 `diy-part1.sh` 的 `src-link nrlocal $GITHUB_WORKSPACE/packages`；workflow
-的 `Load custom configuration` 步骤（2026-10-03 起由已删除的 `diy-part2.sh` 内联而来）里
-已有的「本地包是否真的就位」校验会自动覆盖新包，不用改脚本。
+feed 注册现在写在 workflow 的 `Load custom feeds` 步骤里（`src-link nrlocal
+$GITHUB_WORKSPACE/packages`，原 `diy-part1.sh` 已于 2026-10-03 内联）；`Load custom
+configuration` 步骤（原 `diy-part2.sh` 内联而来）里已有的「本地包是否真的就位」校验
+会自动覆盖新包，不用改任何东西。
 
 ### 4.2 删除
 

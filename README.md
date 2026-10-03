@@ -75,6 +75,26 @@
 > → `Could not find owner package`），没有版本、无法单独升级、无法声明依赖；
 > `/etc/config/*` 也只有做成包的 conffile 才有正确的升级语义。
 
+### 仓库脚本（`scripts/`）
+
+**约定：CI 逻辑只写在 `.github/workflows/openwrt-builder.yml` 里，仓库根目录不放脚本。**
+P3TERX 模板带来的 `diy-part1.sh` / `diy-part2.sh` 已于 2026-10-03 内联进 workflow
+（分别对应 `Load custom feeds` 与 `Load custom configuration` 两步），逻辑逐行等价，
+不再需要 `chmod +x` 与跨文件跳转。`scripts/` 只保留**需要独立运行**的本地工具：
+
+| 脚本 | 在哪跑 | 作用 | 写设备？ |
+|---|---|---|---|
+| `scripts/menuconfig.sh` | 本机 | 在 immortalwrt 工作树里开 menuconfig，退出后自动 defconfig 并把 `.config` 同步回本仓库 | — |
+| `scripts/c8-hw-inventory.sh` | 设备（`ssh root@… 'sh -s' < …`） | 只读清点按键/LED/GPIO/风扇/交换机/模块，用于核对 DTS 与实机是否一致 | 否 |
+| `scripts/c8-backup.sh` | 本机（读设备） | 只读拉取引导/身份/关键分区备份；`--full` 追加 6.7GB 的 `rootfs_2nd` | 否 |
+| `scripts/c8-deploy-ctl.sh` | 本机（写设备） | 把 `packages/c8/{fanctl,ledctl}` 的 `root/` 内容推到设备并 enable/restart（镜像没带时的后门） | 是 |
+| `scripts/mt5700-at.py` | 本机或设备 | MT5700M 只读 AT 探针（可 JSON 输出）；进固件的那份是 `files/usr/bin/mt5700-at` | 否 |
+| `scripts/mt5700-fw-update.sh` | 本机（写设备） | 用 `qemu-arm-static` 跑厂家 32 位升级器给 5G 模组刷固件 | 是 |
+| `scripts/scan-secrets.sh` | 本机 | 推送前隐私扫描（IMEI/ICCID/MAC/手机号/私钥/PSK/token） | 否 |
+
+> 两个会写设备的脚本风险自担：`c8-deploy-ctl.sh` 只覆盖**代码**并**补齐缺失的** UCI 项
+> （已有值一律不覆盖），`mt5700-fw-update.sh` 会刷模组固件。
+
 ## 风扇温控（userspace 兜底）
 
 DTS 里已有 `pwm-fan` 节点（`pwmchip0/pwm0`，25 kHz），但 `cpu-thermal` 的 `cooling-maps`

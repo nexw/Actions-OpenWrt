@@ -2,8 +2,12 @@
 #
 # c8-deploy-ctl.sh — 把 fanctl / ledctl 手动部署到 NRadio C8 设备
 #
-# 用途：镜像里没带这两个脚本时（例如构建用的是旧 commit），直接把仓库里的
-#       files/ 覆盖到设备上；overlay 若在 sysupgrade 后丢了，重跑一次即可。
+# 用途：镜像里没带这两个服务时（例如构建用的是旧 commit），直接把仓库里的
+#       包内容推到设备上；overlay 若在 sysupgrade 后丢了，重跑一次即可。
+#
+# 源目录（2026-10-03 起 fanctl / ledctl 已从 files/ 迁入 apk 包）：
+#   packages/c8/fanctl/root/...、packages/c8/ledctl/root/...
+#   （files/ 现在只剩 mt5700-* 与 uci-defaults，与本脚本无关）
 #
 # 特点：
 #   - 只覆盖「代码」（usr/bin/*、etc/init.d/*），不动你已调优的参数
@@ -18,11 +22,15 @@
 set -euo pipefail
 
 R="${1:-root@192.168.66.1}"
-SRC="$(cd "$(dirname "$0")/.." && pwd)/files"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FANCTL="$ROOT/packages/c8/fanctl/root"
+LEDCTL="$ROOT/packages/c8/ledctl/root"
 SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$R")
 SEC=main
 
-[ -d "$SRC/usr/bin" ] || { echo "找不到 $SRC/usr/bin" >&2; exit 1; }
+for d in "$FANCTL" "$LEDCTL"; do
+	[ -d "$d/usr/bin" ] || { echo "找不到 $d/usr/bin（仓库布局变了？）" >&2; exit 1; }
+done
 
 # 把 'option key 值' / 'list key 值' 解析成 TAB 分隔的 kind/key/value
 parse_cfg() {
@@ -42,16 +50,23 @@ parse_cfg() {
 # 之类会 "Permission denied"。这里统一按仓库内容重放，顺带把 mt5700-* 的工具
 # 与 init.d 的可执行位补齐（chmod 755）。
 # ---- 1. 代码文件 ----
+# 源目录 | 设备路径。含 etc/hotplug.d/ntp/30-ledschedule（NTP 校时后 reload 的钩子），
+# 少了它 ledschedule 的“事件驱动”在时钟跳变时就不完整。
 echo "==> 部署代码到 $R"
-for f in usr/bin/fanctl usr/bin/ledctl etc/init.d/fancontrol etc/init.d/ledschedule; do
-	printf '    %-28s' "/$f"
-	"${SSH[@]}" "cat > /$f && chmod 755 /$f" < "$SRC/$f"
+for spec in "$FANCTL|usr/bin/fanctl" \
+            "$LEDCTL|usr/bin/ledctl" \
+            "$FANCTL|etc/init.d/fancontrol" \
+            "$LEDCTL|etc/init.d/ledschedule" \
+            "$LEDCTL|etc/hotplug.d/ntp/30-ledschedule"; do
+	src="${spec%%|*}"; f="${spec##*|}"
+	printf '    %-38s' "/$f"
+	"${SSH[@]}" "mkdir -p /$(dirname "$f") && cat > /$f && chmod 755 /$f" < "$src/$f"
 	echo ok
 done
 
 # ---- 2. UCI 配置：缺失才补 ----
 deploy_config() {
-	local cfg="$1" file="$SRC/etc/config/$1" kind k v added="" n
+	local cfg="$1" file="$2" kind k v added="" n
 	printf '    %-28s' "/etc/config/$cfg"
 
 	if ! "${SSH[@]}" "[ -f /etc/config/$cfg ]"; then
@@ -81,8 +96,8 @@ deploy_config() {
 }
 
 echo "==> 同步 UCI 配置（不覆盖已有值）"
-deploy_config fancontrol
-deploy_config ledschedule
+deploy_config fancontrol  "$FANCTL/etc/config/fancontrol"
+deploy_config ledschedule "$LEDCTL/etc/config/ledschedule"
 
 # ---- 2.5 修补可执行位（历史镜像里 files/ 有 644 的文件）----
 echo "==> 修补可执行位"

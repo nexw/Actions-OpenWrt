@@ -16,7 +16,6 @@ env:
   BUILD_BRANCH: v25.12.2
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -67,12 +66,42 @@ jobs:
         echo "immortalwrt commit: $(git rev-parse HEAD)"
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Load custom feeds
+    - name: Load custom feeds (extra packages / local feed)
       run: |
+        # 说明：原先这里调用的 diy-part1.sh 已内联到本步骤（2026-10-03）。
+        #       必须在 `feeds update` **之前** 执行：feeds.conf 要先就位。
+        #       仓库根目录从此不再有 diy-part*.sh；按需保留的独立脚本统一放 scripts/。
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        echo "openwrt tree : $(pwd)"
+
+        # ---- 1. 单包仓库（不是 feed，必须直接放进 package/）----
+        # 注意：上游旧脚本写的是 `cd #GITHUB_WORKSPACE/package`（路径被注释掉了），
+        #       实际 cd 到 $HOME，导致 argon 主题从未被真正编进固件。这里修正。
+        for repo in \
+            "https://github.com/jerrykuku/luci-theme-argon.git luci-theme-argon" \
+            "https://github.com/jerrykuku/luci-app-argon-config.git luci-app-argon-config" ; do
+          set -- $repo
+          url="$1"; dir="$2"
+          if [ ! -d "package/$dir" ]; then
+            git clone --depth 1 "$url" "package/$dir"
+          fi
+        done
+
+        # ---- 2. 本仓库自带的本地包：做成 src-link feed ----
+        # 结构：packages/<category>/<pkg>（feed 的标准布局：分类目录/包目录）
+        # 为什么不用 `cp -r packages/* openwrt/package/`：实测直接拷进 package/ 时，
+        # make defconfig 不会给它们生成 config 符号（tmp/.config-package.in 里根本没有
+        # config PACKAGE_luci-app-*，而且连一条 build-dependency 警告都没有）——
+        # 像是包压根没进扫描范围。改走 feeds 机制（所有 feed 包都这样装）最稳。
+        if [ -d "$GITHUB_WORKSPACE/packages" ]; then
+          [ -f feeds.conf ] || cp feeds.conf.default feeds.conf
+          if ! grep -q '^src-link nrlocal ' feeds.conf; then
+            echo "src-link nrlocal $GITHUB_WORKSPACE/packages" >> feeds.conf
+          fi
+          echo "已注册本地 feed: nrlocal -> $GITHUB_WORKSPACE/packages"
+          grep -n nrlocal feeds.conf
+        fi
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
